@@ -1,0 +1,250 @@
+# Iterative dipole training for water.
+#
+# Submit with:
+#     python workflows/water_dipole/run.py --config workflows/water_dipole/training.yaml
+#
+# Worker names come from config/generated/jobflow_remote.yaml, which is rendered
+# from config/machines.conf. They follow <machine>_<role>, with dashes in the
+# machine name replaced by underscores.
+
+name: water_dipole
+species_list: [H, O]
+
+# The jobflow-remote project to submit into -- the name in
+# config/machines.conf, and the file setup deploys to ~/.jfremote/ on the
+# runner. Overridable with --project or $JFREMOTE_PROJECT.
+project: autoplex
+
+# Each iteration is: fit -> sample -> select -> FHI-aims -> merge. The last
+# iteration only fits, so `iterations: 3` runs two rounds of new data.
+iterations: 3
+
+dataset:
+  # Seed structures with their reference dipoles.
+  #
+  # 1000 water dimers, from tr:/scratch/work/zarrout1/reece/dipole/test/
+  # water_dipole_tnep.xyz, converted with:
+  #     autoplex-st-prepare-water data/water_dipole_tnep_raw.xyz \
+  #         -o data/initial.xyz --dipole-unit atomic --polarizability-unit bohr^3
+  #
+  # The raw file holds mu in atomic units (e*a0) and alpha in bohr^3. Converted:
+  # mean |mu| = 0.626 e*Angstrom and alpha = 1.43 Angstrom^3 per water, against a
+  # textbook 1.45 -- so the conversion lands where the physics says it should.
+  #
+  # data/example_synthetic.xyz is the point-charge stand-in, kept so a fresh
+  # installation can be exercised before any real data is in place.
+  initial: data/initial.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+
+  # Units of the seed file. Everything is converted to e*Angstrom / Angstrom^3.
+  # Set these to what your file actually holds -- a wrong choice here fits
+  # cleanly and is wrong by a constant factor.
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  # Gas-phase frames usually arrive with no cell. soap_turbo needs one, and it
+  # must comfortably exceed twice rcut_hard (5.5 A here) so the box does not
+  # clip the descriptor's neighbourhood.
+  box: 20.0
+
+  # The training configurations are isolated molecules, not a periodic solid.
+  # A total dipole moment is only well defined for a non-periodic system -- for
+  # a periodic one it depends on the choice of unit cell -- and the FHI-aims
+  # stage computes these frames as molecules. The box is there to bound the
+  # descriptor, not to tile space.
+  periodic: false
+
+  train_fraction: 0.8
+  seed: 0
+
+  # Present in the reference water data, not fitted, and an empty beta="" in an
+  # extxyz header upsets some readers.
+  drop_info_keys: [beta, epsilon]
+
+# ---------------------------------------------------------------- sampling --
+# How new candidate configurations are generated between iterations.
+sampling:
+  worker: roihu_cpu_turbogap
+
+  # Also sized for six-atom molecules. With method 'rattle' this stage is pure
+  # Python and needs one core; with 'turbogap_md' it is an MD run on a dimer,
+  # which is not much more. The worker's default is a 64-task node, meant for
+  # condensed-phase turboGAP work, and reserving that to displace twenty
+  # structures is a long wait for a second of work.
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 4
+    time: "01:00:00"
+
+  # 'rattle' displaces the structures already in the training set. It needs
+  # nothing but the dataset, which is why it is the default for a first run.
+  #
+  # 'turbogap_md' runs molecular dynamics with turboGAP and samples the
+  # trajectory. It explores far more, and it needs two models:
+  #
+  #   * something to drive the dynamics. MD integrates forces and a dipole model
+  #     has none, so this is not optional. Either set energy_potential to a GAP
+  #     XML -- workflows/vasp_iterative/ produces one -- or leave it null and let
+  #     energy_fit below build one from this run's own FHI-aims energies. The
+  #     second route needs no VASP at all, but the first iteration has no energy
+  #     model yet and falls back to displacement; that is expected.
+  #   * the dipole model fitted this iteration goes into the same turboGAP
+  #     potential file with its blocks flagged `dipole_model = .true.`, so
+  #     turboGAP keeps it out of the energy and force totals and takes only the
+  #     dipole from it. Every written frame then carries this iteration's own
+  #     prediction, which is what says where the model is extrapolating.
+  #
+  # Carrying the dipole model needs a turboGAP built against the soap_turbo fork
+  # (TiganyZ/soap_turbo, branch 'cleanup'). setup/build_turbogap.sh checks that
+  # out and reports whether the binary understands dipole models.
+  method: rattle
+  energy_potential: null
+  carry_dipole_model: true
+
+  rattle_stdev: 0.05
+  n_candidates: 200
+  discard_initial: 2
+
+  # turboGAP input keywords, used only when method is turbogap_md. Written
+  # verbatim, so the syntax is turboGAP's own.
+  md:
+    do_md: ".true."
+    md_nsteps: 2000
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 100
+
+# --------------------------------------------------------------- selection --
+# Reducing the candidates to the ones worth a DFT calculation. Farthest-point
+# sampling is measured against the existing training set, so each round adds
+# configurations that are new relative to what the model has already seen.
+selection:
+  method: fps
+  n_select: 20
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+# ------------------------------------------------------------------ FHI-aims --
+aims:
+  worker: roihu_cpu_aims
+  exec_config: roihu_aims_config
+
+  # Sized for what is actually being calculated: a water dimer is six atoms, and
+  # one of these finishes in minutes on a handful of cores. Each selected
+  # structure becomes its own Slurm job, so asking for a whole node apiece would
+  # reserve 20 nodes to do a few core-minutes of work each -- and queue behind
+  # everything else while doing it.
+  #
+  # 'small' is Roihu's default partition and the one that takes sub-node jobs;
+  # 'medium' is for multi-node work. Nodes here have 384 cores, not 128.
+  #
+  # The account has to be repeated: these replace the worker's resources rather
+  # than being merged into them.
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 8
+    time: "00:30:00"
+
+  # Water clusters in a large box are isolated molecules.
+  molecular: true
+
+  # Merged over the defaults in autoplex_soap_turbo.aims.jobs. Both
+  # electric_field_response and 'dipole' in output must survive, or the run
+  # completes with nothing to harvest.
+  user_params:
+    species_dir: tight
+    xc: pbe
+    output_level: normal
+    electric_field_response: DFPT
+    output: [dipole, mulliken]
+
+    # On by default -- repeated here because it matters and because this is
+    # where you would turn it off. Forces come from the same SCF and are what
+    # the energy model is mostly fitted to; one energy per configuration is very
+    # little to learn from, and MD integrates forces, not energies. FHI-aims
+    # does not compute them unless asked.
+    compute_forces: true
+
+  # False lets a batch through when one structure fails to converge.
+  require_all: false
+
+# ----------------------------------------------------------------- fitting --
+fit:
+  # Triton: the QUIP build with soap_turbo *and* dipole support lives there.
+  # dipole_parameter_name is not in libAtoms/QUIP, so this cannot run just
+  # anywhere -- see gap_fit_env= in config/machines.conf.
+  worker: triton_gapfit
+
+  # account and partition are repeated because jobflow-remote replaces the
+  # worker's resources with these rather than merging them -- leave them out and
+  # the job is submitted with neither. Triton tolerates that; Roihu does not.
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    cpus_per_task: 48
+    time: "1-00:00:00"
+
+  hyperparameters_file: gap_hypers.yaml
+  num_processes: 48
+
+  # The expected error on a dipole component, in e*Angstrom. The main knob:
+  # smaller fits the training data harder.
+  default_dipole_sigma: 0.01
+
+  # gap_fit's {energy force virial hessian} sigmas. Required even though no
+  # energies are fitted here.
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  # Zero for every species: a pure dipole model has no isolated-atom energy.
+  e0:
+    H: 0.0
+    O: 0.0
+
+  openmp_chunk_size: 100
+  gap_file_name: water_dipole.xml
+
+# ------------------------------------------------------- the energy model ----
+# The FHI-aims runs above compute a total energy and forces in the same SCF that
+# gives the dipole. Fitting them costs no extra DFT and produces the potential
+# that drives the turboGAP MD -- which is what turns sampling from "displace
+# what we already have" into "go where the model is uncertain".
+#
+# It runs on the dipole fit's worker unless given one of its own, because it
+# needs the same gap_fit. It uses the dipole model's descriptors unless given
+# its own file, because the two potentials get concatenated into one turboGAP
+# potential file and have to agree.
+energy_fit:
+  enabled: true
+
+  # Do not attempt the fit until this many training frames carry an energy. The
+  # seed dataset has none, so iteration 0 is skipped and the first real fit
+  # happens once a round of FHI-aims has come back. Lower it for a small run.
+  min_frames: 16
+
+  num_processes: 48
+
+  # gap_fit's {energy force virial hessian} sigmas: eV per atom, eV/Angstrom.
+  # No virial is fitted -- these frames are non-periodic and have no stress.
+  default_sigma: [0.001, 0.05, 0.1, 0.1]
+  fit_forces: true
+
+  # This workflow runs no isolated-atom calculations, so gap_fit solves for one
+  # energy per species by least squares over the training compositions. Set e0
+  # instead if you have real isolated-atom energies at this level of theory.
+  e0_method: average
+
+  openmp_chunk_size: 100
+  gap_file_name: water_energy.xml
+
+output_dir: results

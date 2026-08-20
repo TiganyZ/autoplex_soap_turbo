@@ -1,0 +1,28 @@
+# Holds the MongoDB password.
+config/machines.conf
+
+# Rendered from config/machines.conf by setup/render_config.py. Contains
+# credentials, and is regenerated on every setup run.
+config/generated/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+autoplex_venv/
+build/
+dist/
+
+# Workflow scratch. Real datasets are large and belong outside git; the
+# checked-in synthetic example is exempted so the workflows run out of the box.
+workflows/**/results/
+workflows/**/data/*.extxyz
+workflows/**/data/*.xyz
+!workflows/**/data/example_*.xyz
+!workflows/**/data/example_synthetic.xyz
+# Not data: the rigid unit a grand-canonical walk inserts and removes is
+# configuration, and the sampler cannot run without it.
+!workflows/**/data/*_unit.xyz
+!workflows/**/data/README.md
+*.log

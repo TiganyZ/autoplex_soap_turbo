@@ -1,0 +1,260 @@
+# Iterative dipole training for LiF clusters, referenced against VASP.
+#
+# Submit with:
+#     python workflows/lif/run.py --config workflows/lif/training.yaml
+#
+# Worker names come from config/generated/jobflow_remote.yaml, which is rendered
+# from config/machines.conf. They follow <machine>_<role>, with dashes in the
+# machine name replaced by underscores.
+#
+# This is the *dipole* half of LiF. The energy/force model for periodic LiF is a
+# separate run -- workflows/lif/vasp_rss.yaml -- because a total dipole moment is
+# only well defined for a non-periodic system, so the two cannot share a
+# training set. See docs/training-guide.md.
+
+name: lif_dipole
+species_list: [Li, F]
+
+project: autoplex
+
+# Each iteration is: fit -> sample -> select -> VASP -> merge. The last
+# iteration only fits, so `iterations: 3` runs two rounds of new data.
+iterations: 3
+
+dataset:
+  # Neutral (LiF)_n clusters. The checked-in file has point-charge dipoles and
+  # exists only so a fresh installation runs end to end -- regenerate it with
+  # data/make_clusters.py, and replace it with VASP-referenced frames before
+  # any run you intend to believe.
+  initial: data/example_clusters.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+
+  # Units of the seed file. Everything is converted to e*Angstrom / Angstrom^3.
+  # Set these to what your file actually holds -- a wrong choice here fits
+  # cleanly and is wrong by a constant factor.
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  # soap_turbo needs a cell, and it must comfortably exceed twice rcut_hard
+  # (5.5 A here) so the box does not clip the descriptor's neighbourhood. It
+  # also has to leave enough vacuum for the polarizability derivation -- see
+  # vasp.min_vacuum below, which is the binding constraint at 20 A.
+  box: 20.0
+
+  # The training configurations are isolated clusters, not a periodic solid.
+  # A total dipole moment is only well defined for a non-periodic system: for a
+  # periodic one it depends on the choice of unit cell.
+  periodic: false
+
+  train_fraction: 0.8
+  seed: 0
+
+# ---------------------------------------------------------------- sampling --
+sampling:
+  worker: roihu_cpu_turbogap
+
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 4
+    time: "01:00:00"
+
+  # Grand-canonical Monte Carlo. Unlike MD, which explores at fixed composition,
+  # this inserts and removes material at a chemical potential -- so the
+  # candidates vary in size, which for a cluster that grows is the sampling that
+  # matters.
+  #
+  # Like MD, it needs an energy model: the walk accepts against an energy and a
+  # dipole model has none. Iteration 0 therefore falls back to displacement,
+  # which is expected and is recorded as `method: rattle` alongside
+  # `requested_method: gcmc` in the sampling job's output.
+  method: gcmc
+  energy_potential: null
+  carry_dipole_model: true
+
+  # Exchange a whole neutral LiF unit, not individual ions.
+  #
+  # This is the load-bearing choice in the whole file. Inserting a lone Li+ or
+  # F- makes the configuration charged, and the dipole of a charged system
+  # depends on where the origin is put -- so the VASP stage refuses it, and an
+  # iteration's worth of DFT is spent discovering that. Exchanging the neutral
+  # unit keeps every configuration neutral by construction.
+  mc_species: [LiF]
+  mc_molecule_files: [data/lif_unit.xyz]
+
+  # Chemical potential of the LiF unit, in eV, relative to the isolated-species
+  # reference energies (that is what mc_mu_reference: e0 means).
+  #
+  # CALIBRATE THIS. -8.5 eV is roughly the formation energy of bulk LiF per
+  # formula unit, which puts the walk near coexistence -- but the right value
+  # depends on what you want it to sample, and a mu far from the interesting
+  # range gives a walk that runs and accepts no exchange at all. The sampler
+  # warns when every configuration came back the same size, which is what that
+  # looks like.
+  mc_mu: [-8.5]
+  mc_mu_reference: e0
+
+  # Plain displacement alongside the exchanges: a walk that only inserts and
+  # removes never relaxes what it has built.
+  mc_types: [move, insertion, removal]
+  mc_acceptance: [2, 1, 1]
+
+  n_candidates: 200
+  discard_initial: 2
+
+  # turboGAP Monte-Carlo keywords, written verbatim, so the syntax is
+  # turboGAP's own. See docs/keywords.md in the turboGAP source.
+  mc:
+    mc_nsteps: 500
+    mc_move_max: 0.3
+    # Closest an inserted atom may come to an existing one. Below the Li-F bond
+    # length of 1.56 A, so an insertion can still land in a bonding position,
+    # but not on top of an atom.
+    mc_min_dist: 1.2
+    mc_max_dist: 4.0
+    write_xyz: 10
+
+  # Used only if the walk cannot run and the fallback takes over.
+  rattle_stdev: 0.08
+
+# --------------------------------------------------------------- selection --
+# Reducing the candidates to the ones worth a DFT calculation. Farthest-point
+# sampling is measured against the existing training set, so each round adds
+# configurations that are new relative to what the model has already seen.
+selection:
+  method: fps
+  n_select: 20
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+# -------------------------------------------------------------------- VASP --
+# Writing a `vasp:` section is what selects the VASP backend. There is no
+# separate switch, and an `aims:` section alongside this one is refused rather
+# than resolved by precedence.
+vasp:
+  worker: roihu_cpu_vasp
+  exec_config: roihu_vasp_config
+
+  # A LiF cluster is a handful of atoms in a large box, but a large box is a lot
+  # of plane waves -- so this is not as cheap as the same cluster in FHI-aims.
+  # Each selected structure becomes its own Slurm job.
+  #
+  # The account has to be repeated: these replace the worker's resources rather
+  # than being merged into them.
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 32
+    time: "02:00:00"
+
+  # One isolated cluster per cell. VASP is a plane-wave code and always has a
+  # cell, so this is a statement about the box, not about the code: it forces a
+  # Gamma-point calculation and switches on the neutrality and dilution checks.
+  molecular: true
+
+  # Least separation between periodic images at which a polarizability is still
+  # derived. alpha comes from the dielectric tensor through the dilute-gas
+  # relation alpha = V/(4 pi) (eps - 1), which assumes the cell holds one
+  # isolated object; below this the value comes out too small, consistently, so
+  # it looks converged. With box: 20.0 and clusters under 6 A across there is
+  # room to spare.
+  min_vacuum: 8.0
+  strict_vacuum: true
+
+  # Merged over the defaults in autoplex_soap_turbo.vasp.jobs.
+  user_incar_settings:
+    # F is a hard PAW species; 700 eV is comfortably converged for it.
+    ENCUT: 700.0
+    # An insulator with a wide gap: Gaussian smearing, kept narrow.
+    ISMEAR: 0
+    SIGMA: 0.05
+    # A dipole is a property of the charge density, so it wants a converged one.
+    EDIFF: 1.0e-7
+    PREC: Accurate
+    LREAL: false
+    ISYM: 0
+    NCORE: 8
+    # On by default and repeated here because it is what produces the dipole.
+    # LEPSILON gives the dielectric tensor the polarizability comes from.
+    LCALCPOL: true
+    LEPSILON: true
+
+  # False lets a batch through when one structure fails to converge.
+  require_all: false
+
+# ----------------------------------------------------------------- fitting --
+fit:
+  # Triton: the QUIP build with soap_turbo *and* dipole support lives there.
+  # dipole_parameter_name is not in libAtoms/QUIP, so this cannot run just
+  # anywhere -- see gap_fit_env= in config/machines.conf.
+  worker: triton_gapfit
+
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    cpus_per_task: 48
+    time: "1-00:00:00"
+
+  hyperparameters_file: gap_hypers.yaml
+  num_processes: 48
+
+  # The expected error on a dipole component, in e*Angstrom. The main knob:
+  # smaller fits the training data harder. LiF dipoles are large -- an isolated
+  # unit is over 1 e*Angstrom, against 0.6 for water -- so the same fractional
+  # accuracy allows a looser absolute sigma than the water workflow uses.
+  default_dipole_sigma: 0.02
+
+  # gap_fit's {energy force virial hessian} sigmas. Required even though no
+  # energies are fitted here.
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  # Zero for every species: a pure dipole model has no isolated-atom energy.
+  e0:
+    Li: 0.0
+    F: 0.0
+
+  openmp_chunk_size: 100
+  gap_file_name: lif_dipole.xml
+
+# ------------------------------------------------------- the energy model ----
+# The VASP runs above compute a total energy and forces in the same SCF that
+# gives the dipole. Fitting them costs no extra DFT and produces the potential
+# that drives the Monte-Carlo walk -- which is what turns sampling from
+# "displace what we already have" into "grow and shrink the cluster".
+#
+# This is the *cluster* energy model, fitted on non-periodic frames. It is not
+# the periodic LiF potential from workflows/lif/vasp_rss.yaml; if you have that
+# one already, point sampling.energy_potential at it instead and set
+# enabled: false here. See "Mode B" in docs/training-guide.md.
+energy_fit:
+  enabled: true
+
+  # Do not attempt the fit until this many training frames carry an energy. The
+  # seed dataset has none, so iteration 0 is skipped and the first real fit
+  # happens once a round of VASP has come back.
+  min_frames: 20
+
+  num_processes: 48
+
+  # gap_fit's {energy force virial hessian} sigmas: eV per atom, eV/Angstrom.
+  # No virial is fitted -- these frames are non-periodic and have no stress.
+  default_sigma: [0.001, 0.05, 0.1, 0.1]
+  fit_forces: true
+
+  # This workflow runs no isolated-atom calculations, so gap_fit solves for one
+  # energy per species by least squares over the training compositions. Set e0
+  # instead if you have real isolated-atom energies at this level of theory --
+  # and note that a grand-canonical walk needs them to be right, because
+  # mc_mu_reference: e0 measures the chemical potential against them.
+  e0_method: average
+
+  openmp_chunk_size: 100
+  gap_file_name: lif_cluster_energy.xml
+
+output_dir: results

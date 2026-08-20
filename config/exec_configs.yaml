@@ -1,0 +1,58 @@
+# jobflow-remote exec_config blocks: the environment a calculation needs beyond
+# the Python environment itself -- compilers, MPI, the FHI-aims binary.
+#
+# These are merged verbatim into the generated jobflow-remote project, so the
+# syntax is jobflow-remote's own. Point `aims_exec_config=` in machines.conf at
+# the block a machine should use.
+#
+# No credentials belong in this file; it is tracked in git.
+
+roihu_aims_config:
+  modules:
+    - gcc/15.2.0
+    - openmpi/5.0.10
+    - openblas/0.3.30
+    - netlib-scalapack/2.2.2
+  export:
+    AIMS_ROOT: "/projappl/project_2017844/install/FHIaims"
+    ELPA_ROOT: "/projappl/project_2017844/install/elpa-2026.02.001"
+    AIMS_BUILD: "build_gnu_17_no_openmp_openmpi_avx512_cpu"
+    AIMS_BUILD_DIR: "${AIMS_ROOT}/${AIMS_BUILD}"
+    ELPA_BUILD_DIR: "${ELPA_ROOT}/${AIMS_BUILD}"
+    AIMS_SPECIES_DIR: "${AIMS_ROOT}/species_defaults/defaults_2020"
+    LD_LIBRARY_PATH: "${ELPA_BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
+    INCLUDE: "${ELPA_BUILD_DIR}/modules:${INCLUDE}"
+    PATH: "${AIMS_BUILD_DIR}:${PATH}"
+    OMP_NUM_THREADS: 1
+  pre_run: |
+    source /etc/profile
+    source ~/.bashrc
+    ulimit -s unlimited
+
+roihu_aims_gpu_config:
+  modules:
+    - nvhpc
+  export:
+    AIMS_ROOT: "/projappl/project_2017844/install/gpu/FHIaims"
+    ELPA_ROOT: "/projappl/project_2017844/install/gpu/elpa-2026.02.002"
+    AIMS_BUILD: "build_nvhpc_seq_gpu"
+    AIMS_BUILD_DIR: "${AIMS_ROOT}/${AIMS_BUILD}"
+    ELPA_BUILD_DIR: "${ELPA_ROOT}/${AIMS_BUILD}"
+    AIMS_SPECIES_DIR: "${AIMS_ROOT}/species_defaults/defaults_2020"
+    LD_LIBRARY_PATH: "${ELPA_BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
+    INCLUDE: "${ELPA_BUILD_DIR}/modules:${INCLUDE}"
+    PATH: "${AIMS_BUILD_DIR}:${PATH}"
+  pre_run: |
+    source /etc/profile
+    source ~/.bashrc
+    ulimit -s unlimited
+
+roihu_vasp_config:
+  export:
+    OMP_NUM_THREADS: 1
+  pre_run: |
+    source /etc/profile
+    source ~/.bashrc
+    module use /projappl/project_2020289/modules/modulefiles
+    module load vasp/cpu/6.6.1
+    ulimit -s unlimited

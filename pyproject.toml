@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoplex_soap_turbo"
+version = "0.1.0"
+description = "Iterative autoplex training workflows for turboGAP-compatible GAP models, with VASP and FHI-aims reference data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# autoplex itself is deliberately absent: it is installed editable from the
+# `autoplex/` submodule by setup/setup_env_uv.sh, because this workflow needs
+# the soap-turbo-descriptors fork rather than the PyPI release.
+dependencies = [
+    "ase>=3.23",
+    "numpy>=1.24",
+    "monty>=2024.2.2",
+    "pyyaml>=6.0",
+    # The workflows are submitted through jobflow-remote, which autoplex itself
+    # does not require -- it only needs jobflow.
+    "jobflow>=0.1.17",
+    "jobflow-remote>=0.1.5",
+]
+
+[project.optional-dependencies]
+tests = ["pytest>=7.0", "pytest-cov"]
+
+[project.scripts]
+autoplex-st-prepare-water = "autoplex_soap_turbo.cli:prepare_water_dataset"
+autoplex-st-run = "autoplex_soap_turbo.runner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]

@@ -1,0 +1,69 @@
+# GAP hyperparameters for LiF.
+#
+# Loaded as autoplex.settings.MLIPHypers, so anything not listed here falls back
+# to the defaults in autoplex.settings.GAPSettings.
+#
+# The per-species entries (alpha_max, atom_sigma_r, atom_sigma_t, the two
+# scalings, amplitude_scaling, central_weight) take either one value, broadcast
+# to every species, or one value per species in the order of `species_list` in
+# training.yaml -- here Li then F.
+
+GAP:
+  general:
+    # Only soap_turbo. turboGAP cannot evaluate QUIP's `soap` or `distance_Nb`,
+    # so leaving those on would give a potential that fits but cannot convert.
+    two_body: false
+    three_body: false
+    soap: false
+    distance_2b: false
+    angle_3b: false
+    soap_turbo: true
+
+    sparse_jitter: 1.0e-8
+
+  soap_turbo:
+    # LiF rocksalt has a = 4.03 A, so the nearest Li-F distance is 2.01 A and
+    # the second shell is at 2.85 A. A 5.5 A hard cutoff reaches the fourth
+    # shell, which is where the electrostatics have largely averaged out.
+    rcut_hard: 5.5
+    rcut_soft: 5.0
+
+    l_max: 8
+    # 8 radial functions needs the poly3gauss basis: above 7 the plain poly3
+    # basis is numerically unstable, and QUIP makes it an error above 10.
+    alpha_max: 8
+    basis: poly3gauss
+
+    # One value per species, Li then F. F is the smaller, harder ion and its
+    # density varies over a shorter length, so it gets the narrower smearing;
+    # Li is a bare cation whose valence density is diffuse.
+    atom_sigma_r: [0.5, 0.4]
+    atom_sigma_t: [0.5, 0.4]
+    atom_sigma_r_scaling: 0.0
+    atom_sigma_t_scaling: 0.0
+    amplitude_scaling: 1.0
+    central_weight: 1.0
+
+    scaling_mode: polynomial
+    radial_enhancement: 1
+
+    # Both are needed: compress_soap switches compression on, compress_mode
+    # names the recipe. Setting only the mode leaves compression off, and the
+    # fit then differs from a reference run for no visible reason.
+    compress_soap: "true"
+    compress_mode: trivial
+
+    zeta: 4
+    covariance_type: dot_product
+    # delta sets the energy scale the descriptor may explain. For a dipole fit
+    # it is not scaled automatically, because there is no energy residual to
+    # scale it against.
+    delta: 0.1
+    f0: 0.0
+
+    # The ceiling, not the number actually used: the energy fit caps n_sparse at
+    # 90% of the rarest species' environment count, which for early iterations
+    # of a small dataset is far below this. The cap it applied is reported as
+    # `n_sparse_cap` in the fit's output.
+    n_sparse: 500
+    sparse_method: cur_points

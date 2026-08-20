@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# The only file you need to edit.
+#
+#   cp config/machines.conf.example config/machines.conf
+#   $EDITOR config/machines.conf
+#   bash setup/setup_all_machines.sh
+#
+# Everything else -- the jobflow-remote project, the atomate2 config, the
+# worker and exec_config definitions -- is generated from what you write here.
+#
+# This file is sourced by bash, so $HOME and $(hostname) work as you expect.
+# It is listed in .gitignore because it holds your MongoDB password.
+# ---------------------------------------------------------------------------
+
+# --------------------------------------------------------------- MongoDB ----
+# The database that stores the jobflow queue and the calculation outputs.
+
+project_name=autoplex             # jobflow-remote project name
+mongodb_host=CHANGEME             # hostname or IP of the mongod
+mongodb_port=27017
+mongodb_database=autoplex
+mongodb_username=CHANGEME
+mongodb_password=CHANGEME
+mongodb_auth_source=              # leave empty to authenticate against $mongodb_database
+
+# --------------------------------------------------------------- machines ----
+#
+#   machine <name> host=... work_dir=... roles=... [key=value ...]
+#
+# name        label used for the generated jobflow-remote workers
+# host        what you type after `ssh` (an entry in your ~/.ssh/config).
+#             Passwordless key-based access is required.
+# work_dir    where this repo installs its environment and runs calculations
+# roles       comma-separated, from:
+#               runner    -- hosts the jobflow-remote runner and submits flows.
+#                            Exactly one machine must have this role.
+#               vasp      -- runs VASP static calculations
+#               aims      -- runs FHI-aims dipole/polarizability calculations
+#               gapfit    -- runs gap_fit (needs a QUIP build with soap_turbo)
+#               turbogap  -- runs turboGAP MD for structure sampling
+#
+# Optional keys:
+#   scheduler=slurm|shell     how jobs are launched                (default shell)
+#   account=...               SLURM account
+#   partition=...             default SLURM partition
+#   python_module=...         module load'ed before python/uv is usable
+#   modules=a,b,c             modules load'ed before compiling turboGAP
+#   max_jobs=N                jobflow-remote concurrency cap       (default 10)
+#   python_version=3.11       interpreter for the uv venv
+#   vasp_cmd="srun vasp_std"  VASP launch command
+#   gap_fit_env=/path/env.sh  shell file that puts an existing gap_fit on PATH.
+#                             Set this when a suitable QUIP build already exists
+#                             so setup does not try to build one.
+#   turbogap_bin=/path/turbogap  an existing turboGAP binary, same idea
+#   aims_exec_config=NAME     jobflow-remote exec_config for FHI-aims. Define it
+#                             in config/exec_configs.yaml.
+
+machine local \
+    host=$(hostname) \
+    work_dir=$HOME/gap_calculations \
+    roles=runner
+
+machine cluster \
+    host=my-cluster \
+    work_dir=/scratch/project/gap_calculations \
+    roles=vasp,aims,turbogap \
+    scheduler=slurm \
+    account=my_account \
+    partition=medium \
+    python_module=python-data/3.12 \
+    modules=gcc,openmpi,openblas \
+    max_jobs=100 \
+    vasp_cmd="srun vasp_std"

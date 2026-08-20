@@ -1,0 +1,189 @@
+# autoplex RSS configuration for periodic LiF, fitting a turboGAP-compatible
+# energy/force potential.
+#
+# Read by autoplex.settings.RssConfig. Anything not set here falls back to the
+# defaults in that model; see autoplex/configs/rss_config.yaml for the complete
+# list of keys.
+#
+# This is the *energy* half of LiF, and it is periodic. The dipole half
+# (workflows/lif/training.yaml) is not, because a total dipole moment is only
+# well defined for a non-periodic system. The two share descriptors and nothing
+# else.
+
+tag: LiF
+train_from_scratch: true
+
+# Randomised cells per generation round. Start small: an RSS run is not cheap,
+# and the point of the first pass is to find out whether the loop works.
+generated_struct_numbers:
+  - 200
+
+buildcell_options:
+  - ABFIX: false
+    # Formula units per cell. LiF is 1:1, so NFORM counts LiF pairs and every
+    # generated cell is neutral and stoichiometric by construction.
+    NFORM: "{2,4,6,8}"
+    SYMMOPS: 1-4
+    OCTET: false
+    # Rocksalt LiF has a = 4.03 A: Li-F at 2.01 A and like-like at 2.85 A.
+    # Without these, buildcell produces cells with ions on top of each other
+    # that VASP will not converge on.
+    MINSEP: 1.5 Li-F=1.6-2.6 Li-Li=2.2-3.6 F-F=2.2-3.6
+    SPECIES: Li%NUM=1,F%NUM=1
+
+num_processes_buildcell: 32
+num_of_initial_selected_structs:
+  - 20
+num_of_rss_selected_structs: 20
+initial_selection_enabled: true
+rss_selection_method: bcur2i
+
+bcur_params:
+  soap_paras:
+    l_max: 8
+    n_max: 8
+    atom_sigma: 0.5
+    cutoff: 5.5
+    cutoff_transition_width: 0.5
+    zeta: 4.0
+    average: true
+    species: true
+  frac_of_bcur: 0.8
+  bolt_max_num: 300
+
+random_seed: 42
+
+# Isolated atoms give the e0 references, which the energy model is quoted
+# against -- and which mc_mu_reference: e0 in the dipole workflow's sampler
+# measures its chemical potential against, so they need to be right.
+# Dimers pin the short-range repulsion.
+include_isolated_atom: true
+isolatedatom_box: [20.0, 20.0, 20.0]
+include_dimer: true
+dimer_box: [20.0, 20.0, 20.0]
+# From well inside the LiF bond length of 1.56 A out to where the interaction
+# has died away.
+dimer_range: [1.0, 6.0]
+dimer_num: 21
+
+custom_incar:
+  ISMEAR: 0
+  # A wide-gap insulator: narrow smearing, and no metallic occupations to
+  # resolve.
+  SIGMA: 0.05
+  PREC: Accurate
+  ADDGRID: .TRUE.
+  EDIFF: 1e-07
+  NELM: 250
+  LWAVE: .FALSE.
+  LCHARG: .FALSE.
+  ALGO: normal
+  ISYM: 0
+  # F is a hard PAW species; 700 eV is comfortably converged for it.
+  ENCUT: 700.0
+  KSPACING: 0.25
+  LREAL: .FALSE.
+  KPAR: 4
+  NCORE: 8
+
+dft_ref_file: vasp_ref.extxyz
+
+# The per-structure labels that decide which regularization rule applies.
+# `IsolatedAtom` and `dimer` are handled by autoplex's config_type_override and
+# get fixed sigmas; everything else is regularized against the convex hull.
+config_types: [initial, traj_early, traj]
+rss_group: [traj]
+test_ratio: 0.1
+
+# Automatic per-structure regularization: each configuration's sigma is set from
+# its energy distance above the convex hull, so near-hull structures are fitted
+# tightly and high-energy ones are not allowed to drag the fit around. See
+# docs/training-guide.md for the floor and ceiling (reg_minmax) and how to
+# change them.
+regularization: true
+scheme: linear-hull
+
+mlip_type: GAP
+ref_energy_name: REF_energy
+ref_force_name: REF_forces
+ref_virial_name: REF_virial
+auto_delta: true
+num_processes_fit: 48
+
+# How many RSS rounds before stopping, and the convergence criterion on the
+# test error that can stop it sooner.
+max_iteration_number: 5
+stop_criterion: 0.001
+num_processes_rss: 32
+device_for_rss: cpu
+
+# Keeps ions from collapsing onto each other during the RSS relaxations. Keyed
+# by atomic-number pair -- Li is 3, F is 9 -- as [force constant, threshold].
+# The threshold sits below the equilibrium separation, so it is a floor the
+# relaxation cannot fall through rather than a bond it has to keep.
+hookean_repul: true
+hookean_paras:
+  "(3, 9)": [1000, 1.4]
+  "(3, 3)": [1000, 2.0]
+  "(9, 9)": [1000, 2.0]
+
+mlip_hypers:
+  GAP:
+    general:
+      # The turboGAP-evaluable set. Leaving `soap` on here would still fit, but
+      # the potential could not be converted.
+      two_body: false
+      three_body: false
+      soap: false
+      distance_2b: true
+      angle_3b: true
+      soap_turbo: true
+      default_sigma: "{0.0001 0.05 0.05 0}"
+      sparse_jitter: 1.0e-8
+      openmp_chunk_size: 1000
+
+    distance_2b:
+      cutoff: 5.5
+      # turboGAP hardcodes this buffer and cannot read another value from the
+      # potential file. At any other value the fit converts without complaint
+      # and then disagrees with QUIP.
+      cutoff_transition_width: 0.5
+      n_sparse: 40
+      covariance_type: ard_se
+      delta: 0.5
+      theta_uniform: 0.5
+      sparse_method: uniform
+
+    angle_3b:
+      cutoff: 3.25
+      cutoff_transition_width: 0.5
+      n_sparse: 100
+      covariance_type: ard_se
+      delta: 0.5
+      theta_uniform: 1.0
+      # Not `uniform`: that only handles one-dimensional descriptors, and
+      # angle_3b is three-dimensional, so the fit would abort.
+      sparse_method: cur_points
+
+    soap_turbo:
+      rcut_hard: 5.5
+      rcut_soft: 5.0
+      l_max: 8
+      alpha_max: 8
+      basis: poly3gauss
+      atom_sigma_r: 0.5
+      atom_sigma_t: 0.5
+      atom_sigma_r_scaling: 0.0
+      atom_sigma_t_scaling: 0.0
+      amplitude_scaling: 1.0
+      central_weight: 1.0
+      # Both are needed: compress_soap switches compression on, compress_mode
+      # names the recipe.
+      compress_soap: "true"
+      compress_mode: trivial
+      zeta: 4
+      covariance_type: dot_product
+      delta: 0.1
+      f0: 0.0
+      n_sparse: 500
+      sparse_method: cur_points

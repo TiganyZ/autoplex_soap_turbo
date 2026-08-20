@@ -1,0 +1,59 @@
+# Iterative training of the periodic LiF energy/force potential, against VASP.
+#
+# Submit with:
+#     python workflows/vasp_iterative/run.py --config workflows/lif/vasp_rss.yaml
+#
+# This produces a turboGAP-compatible potential for bulk LiF. It is a different
+# model from the cluster energy model fitted inside workflows/lif/training.yaml:
+# this one is periodic and is what you would use for bulk MD, that one is
+# non-periodic and exists to drive the dipole workflow's sampling.
+
+name: lif_rss
+
+# The search itself -- structure generation, selection, how many RSS iterations
+# -- is described by autoplex's own RSS configuration.
+rss_config_file: rss_config.yaml
+
+# ------------------------------------------------------------------- workers --
+
+vasp:
+  worker: roihu_cpu_vasp
+  exec_config: roihu_vasp_config
+  resources:
+    account: project_2017844
+    partition: medium
+    nodes: 1
+    ntasks_per_node: 128
+    time: "02:00:00"
+
+# gap_fit. Triton has the QUIP build with soap_turbo.
+fit:
+  worker: triton_gapfit
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    cpus_per_task: 48
+    time: "1-00:00:00"
+
+# Structure generation, selection and bookkeeping: cheap, and they need
+# buildcell, which lives with the Python environment.
+general:
+  worker: roihu_cpu_worker
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 32
+    time: "04:00:00"
+
+# ------------------------------------------------------------------- VASP -----
+# The INCAR belongs in rss_config.yaml, under `custom_incar`: autoplex updates
+# the static maker with those settings just before submitting, so for any key
+# both files set, rss_config.yaml wins. What goes here is only a baseline for
+# keys rss_config.yaml does not mention.
+user_incar_settings: {}
+
+# A single atom in a large box needs a Gamma-point-only calculation; this is the
+# KSPACING that forces one for the e0 references.
+isolated_atom_kspacing: 100.0

@@ -1,4 +1,0 @@
-VASP_CMD: "srun vasp_std"
-VASP_USE_EMMET_MODELS: true
-AIMS_CMD: "srun aims > aims.out"
-

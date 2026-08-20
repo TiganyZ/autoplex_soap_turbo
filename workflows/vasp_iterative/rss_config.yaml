@@ -1,0 +1,166 @@
+# autoplex RSS configuration for water, fitting a turboGAP-compatible potential.
+#
+# Read by autoplex.settings.RssConfig. Anything not set here falls back to the
+# defaults in that model; see autoplex/configs/rss_config.yaml for the complete
+# list of keys.
+#
+# The one thing this file does differently from a stock autoplex RSS run is the
+# descriptor set: soap_turbo / distance_2b / angle_3b instead of QUIP's soap.
+# That is what makes the fitted potential loadable by turboGAP, and therefore
+# usable as the MD sampling potential for the dipole workflow.
+
+tag: H2O
+train_from_scratch: true
+
+# Randomised cells per generation round. Start small: an RSS run is not cheap,
+# and the point of the first pass is to find out whether the loop works.
+generated_struct_numbers:
+  - 200
+
+buildcell_options:
+  - ABFIX: false
+    NFORM: "{2,4,6}"
+    SYMMOPS: 1-4
+    OCTET: false
+    # Keep hydrogens off each other and O-H near a real bond length; without
+    # these buildcell happily produces cells VASP will not converge on.
+    MINSEP: 1.0 H-H=1.4-2.0 O-H=0.9-1.2 O-O=2.4-3.2
+    SPECIES: O%NUM=1,H%NUM=2
+
+num_processes_buildcell: 32
+num_of_initial_selected_structs:
+  - 20
+num_of_rss_selected_structs: 20
+initial_selection_enabled: true
+rss_selection_method: bcur2i
+
+bcur_params:
+  soap_paras:
+    l_max: 8
+    n_max: 8
+    atom_sigma: 0.5
+    cutoff: 5.5
+    cutoff_transition_width: 0.5
+    zeta: 4.0
+    average: true
+    species: true
+  frac_of_bcur: 0.8
+  bolt_max_num: 300
+
+random_seed: 42
+
+# Isolated atoms give the e0 references. Dimers help the short-range repulsion.
+include_isolated_atom: true
+isolatedatom_box: [20.0, 20.0, 20.0]
+include_dimer: true
+dimer_box: [20.0, 20.0, 20.0]
+dimer_range: [0.7, 5.0]
+dimer_num: 21
+
+custom_incar:
+  ISMEAR: 0
+  SIGMA: 0.05
+  PREC: Accurate
+  ADDGRID: .TRUE.
+  EDIFF: 1e-07
+  NELM: 250
+  LWAVE: .FALSE.
+  LCHARG: .FALSE.
+  ALGO: normal
+  ISYM: 0
+  ENCUT: 700.0
+  KSPACING: 0.25
+  LREAL: .FALSE.
+  KPAR: 4
+  NCORE: 8
+
+dft_ref_file: vasp_ref.extxyz
+config_types: [initial, traj_early, traj]
+rss_group: [traj]
+test_ratio: 0.1
+regularization: true
+scheme: linear-hull
+
+mlip_type: GAP
+ref_energy_name: REF_energy
+ref_force_name: REF_forces
+ref_virial_name: REF_virial
+auto_delta: true
+num_processes_fit: 48
+
+# How many RSS rounds before stopping, and the convergence criterion on the
+# test error that can stop it sooner.
+max_iteration_number: 5
+stop_criterion: 0.001
+num_processes_rss: 32
+device_for_rss: cpu
+
+# Keeps O-H from collapsing during the RSS relaxations.
+hookean_repul: true
+hookean_paras:
+  "(1, 1)": [1000, 0.8]
+  "(8, 1)": [1000, 0.7]
+  "(8, 8)": [1000, 1.8]
+
+mlip_hypers:
+  GAP:
+    general:
+      # The turboGAP-evaluable set. Leaving `soap` on here would still fit, but
+      # the potential could not be converted.
+      two_body: false
+      three_body: false
+      soap: false
+      distance_2b: true
+      angle_3b: true
+      soap_turbo: true
+      default_sigma: "{0.0001 0.05 0.05 0}"
+      sparse_jitter: 1.0e-8
+      openmp_chunk_size: 1000
+
+    distance_2b:
+      cutoff: 5.5
+      # turboGAP hardcodes this buffer and cannot read another value from the
+      # potential file. At any other value the fit converts without complaint
+      # and then disagrees with QUIP.
+      cutoff_transition_width: 0.5
+      n_sparse: 40
+      covariance_type: ard_se
+      delta: 0.5
+      theta_uniform: 0.5
+      sparse_method: uniform
+
+    angle_3b:
+      cutoff: 3.25
+      cutoff_transition_width: 0.5
+      n_sparse: 100
+      covariance_type: ard_se
+      delta: 0.5
+      theta_uniform: 1.0
+      # Not `uniform`: that only handles one-dimensional descriptors, and
+      # angle_3b is three-dimensional, so the fit would abort.
+      sparse_method: cur_points
+
+    soap_turbo:
+      rcut_hard: 5.5
+      rcut_soft: 5.0
+      l_max: 8
+      alpha_max: 8
+      basis: poly3gauss
+      atom_sigma_r: 0.5
+      atom_sigma_t: 0.5
+      atom_sigma_r_scaling: 0.0
+      atom_sigma_t_scaling: 0.0
+      amplitude_scaling: 1.0
+      central_weight: 1.0
+      scaling_mode: polynomial
+      radial_enhancement: 1
+      # Both are needed: compress_soap switches compression on, compress_mode
+      # names the recipe.
+      compress_soap: "true"
+      compress_mode: trivial
+      zeta: 4
+      covariance_type: dot_product
+      delta: 0.1
+      f0: 0.0
+      n_sparse: 500
+      sparse_method: cur_points
