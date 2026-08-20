@@ -42,9 +42,17 @@ logger = logging.getLogger(__name__)
 
 #: Vacuum, in Angstrom, below which the dilute-gas polarizability is refused.
 #:
-#: alpha converges slowly with box size, and too small a box gives a number that
-#: is wrong in the same direction every time rather than noisily -- so it looks
-#: like a converged result.
+#: Periodic images of a polarizable object polarise each other, so the cell does
+#: not respond the way one isolated molecule would. For a cubic array the
+#: Clausius-Mossotti relation gives eps - 1 = 4 pi n a / (1 - 4 pi n a / 3), and
+#: inverting that with the bare dilute formula therefore returns an alpha that is
+#: too *large*. The error is systematic rather than noisy -- it is a smooth
+#: function of density -- so an under-converged value looks like a converged one.
+#:
+#: Measured on an LiF monomer (workflows/lif/validation/box_convergence.py):
+#: +0.4% at 8.4 A between images, +0.1% at 10.4 A, converged by 13 A. Small for a
+#: small molecule, but it scales with alpha/V, so a big cluster in a tight box
+#: drifts further.
 DEFAULT_MIN_VACUUM = 5.0
 
 #: ``dipolmoment  x y z electrons x,y,z``, from the LDIPOL/IDIPOL correction.
@@ -70,6 +78,13 @@ _P_ION_RE = re.compile(
 _DIELECTRIC_RE = re.compile(
     r"MACROSCOPIC STATIC DIELECTRIC TENSOR[^\n]*\n\s*-+\s*\n"
     r"((?:\s*[-+0-9.eEdD]+\s+[-+0-9.eEdD]+\s+[-+0-9.eEdD]+\s*\n){3})"
+)
+
+#: The ``direct lattice vectors`` block, needed to fold a Berry-phase dipole.
+_LATTICE_RE = re.compile(
+    r"direct lattice vectors[^\n]*\n"
+    r"((?:\s*[-+0-9.eEdD]+\s+[-+0-9.eEdD]+\s+[-+0-9.eEdD]+"
+    r"(?:\s+[-+0-9.eEdD]+){0,3}\s*\n){3})"
 )
 
 #: ``free  energy   TOTEN  =  -123.456 eV``. The last one is the converged value.
@@ -264,8 +279,9 @@ def polarizability_from_dielectric(
             f"only {vacuum:.2f} A between periodic images, below the "
             f"{min_vacuum:.2f} A this converts at. The dilute-gas relation "
             "alpha = V/(4 pi) (eps - 1) assumes the cell holds one isolated "
-            "object, and below that it returns a polarizability that is too "
-            "small -- consistently, so it looks converged. Use a larger box, or "
+            "object; when it does not, periodic images polarise each other and "
+            "the value comes out too large -- systematically, as a smooth "
+            "function of density, so it looks converged. Use a larger box, or "
             "pass strict_vacuum=False if you have checked convergence yourself."
         )
         if strict_vacuum:
@@ -293,21 +309,95 @@ def _parse_dielectric(text: str) -> np.ndarray | None:
     return np.asarray(rows, dtype=float).reshape(3, 3)
 
 
-def _parse_dipole(text: str) -> tuple[np.ndarray | None, str | None]:
-    """The total dipole in e*Angstrom, and which route produced it."""
-    elec = _P_ELEC_RE.search(text)
-    ion = _P_ION_RE.search(text)
-    if elec is not None and ion is not None:
-        p_elec = np.array([_to_float(elec.group(i)) for i in (1, 2, 3)])
-        p_ion = np.array([_to_float(ion.group(i)) for i in (1, 2, 3)])
-        return p_elec + p_ion, "LCALCPOL"
+def _parse_lattice(text: str) -> np.ndarray | None:
+    """The cell, in Angstrom, from the OUTCAR's own lattice block."""
+    match = _LATTICE_RE.search(text)
+    if match is None:
+        return None
+    rows = []
+    for line in match.group(1).strip().splitlines():
+        values = [_to_float(v) for v in line.split()]
+        if len(values) < 3:
+            return None
+        # The block prints direct vectors and reciprocal vectors side by side.
+        rows.append(values[:3])
+    return np.asarray(rows, dtype=float)
 
+
+def fold_dipole(dipole: np.ndarray, cell: np.ndarray) -> np.ndarray:
+    """Fold a Berry-phase dipole into the primitive interval.
+
+    A Berry-phase polarization is only defined modulo a quantum: adding one
+    lattice vector's worth of charge displacement, e*R, is not a different
+    physical state. VASP reports p[ion] using positions wrapped into the cell,
+    so the sum p[elc] + p[ion] can come back many quanta away from the small
+    number that is the molecule's actual dipole -- for an LiF monomer in a 15 A
+    box it reads (-60, -60, -46.3) e*Angstrom, where the answer is (0, 0, -1.29).
+
+    Nothing about the large value looks wrong: it is finite, it has the right
+    units, and it would train a model perfectly well on a completely fictitious
+    target. So the fold is not a tidy-up, it is the difference between a
+    reference value and a wrong one.
+
+    Folds each component in *fractional* coordinates, because the quantum is a
+    lattice vector rather than a Cartesian axis.
+    """
+    fractional = np.linalg.solve(np.asarray(cell, dtype=float).T, np.asarray(dipole, dtype=float))
+    # Wrap to (-0.5, 0.5]: the representative nearest the origin.
+    wrapped = fractional - np.round(fractional)
+    return np.asarray(cell, dtype=float).T @ wrapped
+
+
+def _parse_dipole(
+    text: str, cell: np.ndarray | None = None
+) -> tuple[np.ndarray | None, str | None]:
+    """The total dipole in e*Angstrom, and which route produced it.
+
+    The IDIPOL route is preferred over the Berry phase, which is the opposite of
+    what it was: p[elc] + p[ion] is only defined modulo e*R, and folding it back
+    is unambiguous only while the true dipole is shorter than half a cell
+    vector. A large cluster in a tight box can alias to a smaller dipole with no
+    sign that it happened. The `dipolmoment` line has no such ambiguity.
+
+    Both routes are normalised to the physical convention, mu = sum_i q_i r_i
+    with the electron charge negative. VASP's `dipolmoment` is reported in
+    "electrons x Angstroem" -- it measures the electronic displacement and so
+    carries the opposite sign. Checked on the LiF monomer, where the geometry
+    fixes the answer independently: Li+ at z = 6.718 and F- at z = 8.282 give
+    mu_z = -1.564 e*Angstrom at full ionicity, and the two routes agree at
+    -1.278 and -1.286 once the sign and the fold are applied.
+    """
     correction = list(_DIPOLMOMENT_RE.finditer(text))
     if correction:
         # The last one: the dipole correction is recomputed each electronic
         # step, and only the final value belongs to the converged density.
         last = correction[-1]
-        return np.array([_to_float(last.group(i)) for i in (1, 2, 3)]), "LDIPOL"
+        reported = np.array([_to_float(last.group(i)) for i in (1, 2, 3)])
+        return -reported, "IDIPOL"
+
+    elec = _P_ELEC_RE.search(text)
+    ion = _P_ION_RE.search(text)
+    if elec is not None and ion is not None:
+        p_elec = np.array([_to_float(elec.group(i)) for i in (1, 2, 3)])
+        p_ion = np.array([_to_float(ion.group(i)) for i in (1, 2, 3)])
+        total = p_elec + p_ion
+        if cell is None:
+            logger.warning(
+                "a Berry-phase dipole was found but the cell could not be read, "
+                "so it could not be folded by the polarization quantum. The "
+                "value is only meaningful modulo a lattice vector."
+            )
+            return total, "LCALCPOL (unfolded)"
+        folded = fold_dipole(total, cell)
+        shortest = float(np.min(np.linalg.norm(np.asarray(cell, dtype=float), axis=1)))
+        if np.linalg.norm(folded) > 0.4 * shortest:
+            logger.warning(
+                "the folded Berry-phase dipole is %.2f e*Angstrom, which is a "
+                "large fraction of the %.2f Angstrom cell: the fold may have "
+                "aliased. Use IDIPOL = 4 for a value with no modulo ambiguity.",
+                float(np.linalg.norm(folded)), shortest,
+            )
+        return folded, "LCALCPOL"
 
     return None, None
 
@@ -327,7 +417,7 @@ def parse_vasp_response(
     path = Path(path)
     text = _read_text(path)
 
-    dipole, route = _parse_dipole(text)
+    dipole, route = _parse_dipole(text, _parse_lattice(text))
     if route:
         logger.debug("dipole from %s in %s", route, path)
 

@@ -1,0 +1,285 @@
+# Mode B: train only the dipole model, against an existing LiF energy/force GAP.
+#
+#     python workflows/lif/run.py --config workflows/lif/validation/training_frozen_gap.yaml
+#
+# The energy/force model is frozen. It drives the grand-canonical walk that
+# generates candidates and is never refitted, so the only thing that iterates is
+# the dipole model. Use this when you already have a potential you trust -- which
+# is what makes it the common case, and what makes it cheap: no energy fit, and
+# 13 jobs per run instead of 16.
+#
+# What makes this Mode B is exactly two settings, and nothing else:
+#     sampling.energy_potential  points at the existing potential
+#     energy_fit.enabled         false
+# Set the first and leave the second true and you get Mode A with a warm start.
+
+name: lif_dipole_frozen
+species_list: [Li, F]
+project: autoplex
+
+# Superseded by validation.max_iterations below, which is what actually bounds
+# this run. Kept so the file still loads if you switch validation off.
+iterations: 3
+
+dataset:
+  # Harvested by validation/parse_vasp_reference.py from the VASP runs on the
+  # grand-canonical configurations. Every frame carries mu and alpha in the
+  # canonical units, plus REF_energy and REF_forces from the same SCF.
+  initial: lif_dipole_reference.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+
+  # What parse_vasp_reference.py writes. VASP reports the dipole in e*Angstrom
+  # already -- unlike FHI-aims, which reports atomic units -- so this is not a
+  # conversion, it is a statement that no conversion is needed.
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  # Matches REFERENCE_BOX in select_reference_set.py. It has to: the
+  # polarizability was derived from the dielectric tensor of *this* cell.
+  box: 20.0
+
+  # Isolated clusters. A total dipole moment is only well defined for a
+  # non-periodic system.
+  periodic: false
+
+  train_fraction: 0.8
+  seed: 0
+
+sampling:
+  worker: roihu_cpu_turbogap
+
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 8
+    time: "02:00:00"
+
+  method: gcmc
+
+  # The frozen model. This is what makes it Mode B.
+  #
+  # A turboGAP-format .gap file must keep its gap_files/ directory beside it --
+  # it names the sparse descriptor files by relative path, and moving the .gap
+  # without them gives a potential that loads and predicts nothing.
+  energy_potential: /scratch/project_2017844/gap_calculations/lif_dipole_test/gap_files/LiF.gap
+
+  # The dipole model fitted this iteration rides along in the same potential
+  # file, flagged dipole_model so turboGAP keeps it out of the energy and force
+  # totals. Every written configuration then carries the current prediction,
+  # which is what says where the model is extrapolating.
+  carry_dipole_model: true
+
+  mc_species: [LiF]
+  mc_molecule_files: [lif_unit.xyz]
+  mc_mu_reference: e0
+
+  # CALIBRATED, not guessed -- and the calibration is the point.
+  #
+  # The first attempt used -8.58 eV, the bulk formation energy per formula unit.
+  # The walk ran to completion and accepted one insertion in 124 attempts: mu is
+  # weighed against the *insertion* energy, which for this cluster is about
+  # -6.2 eV, not against the bulk cohesive energy. Nothing reported a failure;
+  # the candidates were simply all the size of the seed.
+  #
+  # At -7.0 the walk exchanges freely and grows 10 -> 202 atoms over 600 steps.
+  # Removal is almost never accepted -- pulling a unit out of a condensed
+  # cluster costs far more than adding one to its surface -- so the walk is
+  # growth-biased by construction and the size range is set by run length.
+  #
+  # Re-run validation/gcmc_scan.py + gcmc_report.py if you change the seed:
+  # this number belongs to this cluster, not to LiF.
+  mc_mu: [-7.0]
+
+  mc_types: [move, insertion, removal]
+  mc_acceptance: [2, 1, 1]
+
+  n_candidates: 200
+  discard_initial: 2
+
+  mc:
+    mc_nsteps: 600
+    mc_move_max: 0.3
+    # Below the 1.564 A Li-F bond, so an insertion can still land in a bonding
+    # position but not on top of an existing atom.
+    mc_min_dist: 1.2
+    # The one that decides whether the walk works at all in a large box.
+    # Without it an insertion is placed uniformly in the cell: for a 3 A cluster
+    # in a 20 A box that is vacuum essentially every time, the trial is an
+    # unbound LiF unit, and it is always rejected. Capping the distance to the
+    # nearest existing atom keeps trials on the cluster.
+    mc_max_dist: 3.5
+    t_beg: 500.0
+    write_xyz: 5
+
+  rattle_stdev: 0.08
+
+selection:
+  method: fps
+  n_select: 20
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+vasp:
+  worker: roihu_cpu_vasp
+  exec_config: roihu_vasp_config
+
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 16
+    # Not optional, and not a safety margin. The default on `small` is 1 GB per
+    # core; a DFPT response on a 20 A box needs about 1.2 GB per rank, because
+    # LEPSILON holds the unoccupied bands alongside the occupied ones on a
+    # 360^3 grid. Left at the default, every task is OOM-killed partway through
+    # the response loop -- and the batch step still exits 0, so the failure is
+    # visible only in `sacct --format=State,MaxRSS` and in an OUTCAR that stops
+    # mid-run. 16 ranks rather than 32: the per-rank cost barely falls with
+    # rank count here, so more ranks is mostly more memory.
+    mem_per_cpu: 4G
+    time: "04:00:00"
+
+  molecular: true
+
+  # alpha = V/(4 pi)(eps - 1) assumes the cell holds one isolated object. Below
+  # this separation the value comes out too small -- consistently, and in one
+  # direction, so an under-converged polarizability looks converged.
+  min_vacuum: 8.0
+  strict_vacuum: true
+
+  user_incar_settings:
+    ENCUT: 700          # 1.3 x ENMAX for Li_sv (499 eV); F is 400 eV
+    ISMEAR: 0
+    SIGMA: 0.05
+    EDIFF: 1.0e-7
+    PREC: Accurate
+    LREAL: false
+    ISYM: 0
+    ALGO: Normal
+
+    # Report the dipole; do NOT correct the potential for it.
+    #
+    # LDIPOL = .TRUE. adds a compensating potential across the vacuum, and in a
+    # box this empty that sloshes: the SCF reaches 1e-5, jumps several eV, and
+    # oscillates without settling. IDIPOL alone makes VASP print `dipolmoment`,
+    # which is the number the training set wants. Measured on the LiF monomer:
+    # 30+ non-converging steps with LDIPOL, 19 steps to EDIFF without it.
+    IDIPOL: 4
+    DIPOL: "0.5 0.5 0.5"
+
+    # The dielectric tensor the polarizability is derived from.
+    LEPSILON: true
+
+    # Damped mixing, for the same reason. An isolated cluster in a 20 A cell is
+    # ~99% vacuum and the defaults are not written for that.
+    AMIX: 0.1
+    BMIX: 0.01
+    AMIN: 0.01
+
+    NCORE: 8
+
+  require_all: false
+
+fit:
+  worker: triton_gapfit
+
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    cpus_per_task: 48
+    time: "1-00:00:00"
+
+  hyperparameters_file: ../gap_hypers.yaml
+  num_processes: 48
+
+  # Expected error on a dipole component, in e*Angstrom. LiF dipoles are large
+  # -- one unit is ~1.28 e*Angstrom, against 0.6 for water -- so the same
+  # fractional accuracy allows a looser absolute sigma than the water workflow.
+  default_dipole_sigma: 0.02
+
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  # A pure dipole model has no isolated-atom energy.
+  e0:
+    Li: 0.0
+    F: 0.0
+
+  openmp_chunk_size: 100
+  gap_file_name: lif_dipole.xml
+
+# The half that is switched off, and the whole difference from Mode A.
+#
+# The VASP runs still produce energies and forces -- parse_vasp_reference.py
+# harvests them and they sit in the dataset -- they are simply not fitted. Turn
+# this on if you want the cluster energy model to improve alongside the dipole
+# model; leave it off to keep the sampling reproducible across iterations, since
+# a refitted potential changes what the walk explores.
+energy_fit:
+  enabled: false
+
+
+
+# --------------------------------------------------------------- validation ---
+#
+# The independent test set, and the rule that ends the run.
+#
+# dataset.train_fraction above already holds 20% of the seed data back, but
+# those frames came out of the same walk and the same DFT batch as the training
+# frames. Scoring on them answers "does the model interpolate within what it was
+# given?", and a loop that stops on that answer stops when it has learned its own
+# sampler. This section answers the question worth stopping on: a *separate*
+# grand-canonical walk, its own VASP batch, computed once before the first fit
+# and never merged into the training set.
+#
+# Both halves of the rule are required. Without a tolerance the gate never
+# fires; without a budget a model that cannot reach the tolerance runs forever.
+validation:
+  enabled: true
+
+  # Generate it here rather than supply a file. This is only possible because
+  # the run is Mode B: the walk needs an energy model, and the frozen potential
+  # above is one that exists before anything has been fitted. In Mode A there is
+  # no model until iteration 0 has run, and a test set generated by the model it
+  # is meant to judge is not a fixed benchmark -- so Mode A must use
+  # `source: file` with a set computed separately.
+  source: generate
+
+  n_select: 20
+
+  # A different random stream from the training sampler, so the two walks
+  # explore the same protocol independently. Large enough not to collide with
+  # the per-iteration offsets, which are dataset.seed + iteration.
+  seed_offset: 1000
+
+  # Overrides on top of the `sampling` section, for the test-set walk only.
+  # Merged key by key, one level into `mc` as well, so everything unlisted is
+  # inherited -- deliberately, since the set is supposed to measure the model on
+  # the distribution it will be used on. Only the walk length differs: one longer walk reaches larger clusters than any single
+  # training iteration does, which is where a dipole model extrapolates worst
+  # and so where a test set earns its keep.
+  sampling:
+    mc:
+      mc_nsteps: 1000
+
+  # Test RMSE per dipole component, e*Angstrom. An LiF unit carries about
+  # 1.28 e*Angstrom, so 0.03 is roughly 2% of a single unit's dipole and well
+  # inside the ~3% error PBE itself makes against the monomer's experimental
+  # value -- there is no point converging the fit past the reference data.
+  tolerance: 0.03
+
+  # The budget for this generation protocol. GCMC on this seed grows the cluster
+  # by roughly a unit every few accepted insertions, so ten iterations of 20
+  # frames covers the size range the walk reaches before the DFT cost of a frame
+  # becomes the limit.
+  max_iterations: 10
+
+  # Fit at least twice before the gate may stop the run. Iteration 0 is fitted
+  # to the seed data alone, and a seed set that happens to resemble the test set
+  # can clear the tolerance without the model having learned anything the loop
+  # was built to teach it.
+  min_iterations: 2

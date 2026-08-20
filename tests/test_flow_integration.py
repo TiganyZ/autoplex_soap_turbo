@@ -674,3 +674,275 @@ def test_the_best_iteration_is_still_right_when_the_worst_fit_came_last(settings
     summary = run(summarise_run, results, settings.as_dict())
 
     assert summary["best_iteration"] == 1
+
+
+# ------------------------------------------------- the convergence-gated loop ---
+#
+# A gated run cannot be inspected the way a fixed one can: how many iterations
+# it takes is the thing it measures. These tests check the first iteration's
+# shape up front, and the gate's decision by calling it directly with scores it
+# would have been handed.
+
+
+def gated_settings(tmp_path, **validation) -> TrainingConfig:
+    """A Mode B settings object with the convergence gate switched on."""
+    settings = settings_with(
+        tmp_path,
+        name="gated",
+        sampling={
+            "method": "gcmc",
+            "n_candidates": 30,
+            "energy_potential": "frozen.gap",
+            "mc_species": ["LiF"],
+            "mc_mu": [-7.0],
+            "worker": "roihu_cpu_turbogap",
+        },
+        vasp={"worker": "roihu_cpu_vasp"},
+        fit={"hyperparameters_file": "hypers.yaml", "worker": "triton_gapfit"},
+        energy_fit={"enabled": False},
+        validation={"enabled": True, "tolerance": 0.03, **validation},
+    )
+    return settings
+
+
+def gate(settings, rmse, iteration=0, history=None):
+    """Call the gate with a score, and hand back what it decided."""
+    from autoplex_soap_turbo.flows.iterative_dipole import convergence_gate
+
+    return run(
+        convergence_gate,
+        {"frames": {"train": [], "test": []}},
+        {"source": "generated", "n_frames": 20},
+        {"iteration": iteration, "n_train": 40, "test_error": {"rmse_component": 0.1}},
+        {"iteration": iteration, "n_frames": 20,
+         "errors": None if rmse is None else {"rmse_component": rmse, "r2_component": 0.9}},
+        settings.as_dict(),
+        iteration,
+        history or [],
+    )
+
+
+def test_a_gated_flow_builds_the_test_set_before_it_fits_anything(tmp_path):
+    flow = iterative_dipole_training(gated_settings(tmp_path))
+    names = [node.name for node in flow.jobs]
+
+    assert names[0].endswith("prepare dataset")
+    assert "gated: validation sample" in names
+    assert "gated: validation select" in names
+    assert "gated: validation set" in names
+    # The validation set is complete before the first fit, so every iteration is
+    # scored on the same frames.
+    assert names.index("gated: validation set") < len(names) - 1
+
+
+def test_only_the_first_iteration_exists_up_front(tmp_path):
+    flow = iterative_dipole_training(gated_settings(tmp_path, max_iterations=10))
+
+    inner = [
+        job.name
+        for node in flow.jobs
+        for job in (node.jobs if hasattr(node, "jobs") else [node])
+    ]
+    assert sum(name.startswith("gated: fit ") for name in inner) == 1
+    assert "gated: check 0" in inner
+    # Iteration 1 onwards is the gate's business, at run time.
+    assert not any(name.endswith(" 1") for name in inner)
+
+
+def test_the_validation_stages_run_on_the_sampling_and_dft_workers(tmp_path):
+    flow = iterative_dipole_training(gated_settings(tmp_path))
+    workers = {
+        node.name: (node.config.manager_config or {}).get("worker")
+        for node in flow.jobs
+        if hasattr(node, "config")
+    }
+
+    assert workers["gated: validation sample"] == "roihu_cpu_turbogap"
+
+
+def test_the_evaluation_runs_where_the_potential_was_fitted(tmp_path):
+    # quip and the fitted potential are both on the fitting worker; scoring
+    # anywhere else would mean shipping both to a machine with no QUIP.
+    flow = iterative_dipole_training(gated_settings(tmp_path))
+    iteration = flow.jobs[-1]
+    workers = {
+        job.name: (job.config.manager_config or {}).get("worker")
+        for job in iteration.jobs
+    }
+    assert workers["gated: validate 0"] == "triton_gapfit"
+    assert workers["gated: fit 0"] == "triton_gapfit"
+
+
+def test_a_score_inside_the_tolerance_stops_the_run(tmp_path):
+    response = gate(gated_settings(tmp_path, min_iterations=1), rmse=0.01)
+
+    assert response.replace is None
+    assert response.output["converged"] is True
+    assert response.output["iterations_run"] == 1
+    assert "0.01" in response.output["stopped_because"]
+
+
+def test_a_score_above_the_tolerance_builds_the_next_iteration(tmp_path):
+    response = gate(gated_settings(tmp_path), rmse=0.5)
+
+    assert response.replace is not None
+    names = [
+        job.name
+        for node in response.replace.jobs
+        for job in (node.jobs if hasattr(node, "jobs") else [node])
+    ]
+    # The rest of this iteration, then the next one.
+    assert "gated: sample 0" in names
+    assert "gated: merge 0" in names
+    assert "gated: fit 1" in names
+    assert "gated: check 1" in names
+
+
+def test_the_dft_batch_is_not_spent_on_an_iteration_that_will_not_happen(tmp_path):
+    # Sampling and DFT are built by the gate, after the score, so a converged
+    # model has not already paid for data nothing will be fitted to.
+    response = gate(gated_settings(tmp_path, min_iterations=1), rmse=0.01)
+    assert response.replace is None
+
+
+def test_the_budget_stops_the_run_and_says_it_did_not_converge(tmp_path):
+    settings = gated_settings(tmp_path, max_iterations=3)
+    response = gate(settings, rmse=0.5, iteration=2)
+
+    assert response.replace is None
+    assert response.output["converged"] is False
+    assert "max_iterations" in response.output["stopped_because"]
+    assert response.output["iterations_run"] == 3
+
+
+def test_a_missing_score_is_not_treated_as_convergence(tmp_path):
+    # An evaluation that produced nothing means the measurement failed, not that
+    # the model is good -- and "no error" is exactly what a broken one reports.
+    response = gate(gated_settings(tmp_path), rmse=None)
+    assert response.replace is not None
+
+
+def test_the_minimum_iteration_count_holds_the_gate_shut(tmp_path):
+    settings = gated_settings(tmp_path, min_iterations=2)
+    response = gate(settings, rmse=0.001, iteration=0)
+
+    assert response.replace is not None, "iteration 0 cannot end the run"
+
+    later = gate(settings, rmse=0.001, iteration=1)
+    assert later.replace is None
+    assert later.output["converged"] is True
+
+
+def test_the_summary_carries_every_score_the_gate_saw(tmp_path):
+    settings = gated_settings(tmp_path, min_iterations=1)
+    first = gate(settings, rmse=0.5, iteration=0)
+    history = _history_of(first)
+    final = gate(settings, rmse=0.01, iteration=1, history=history)
+
+    scores = final.output["validation"]
+    assert [row["iteration"] for row in scores] == [0, 1]
+    assert [row["validation_rmse"] for row in scores] == [0.5, 0.01]
+    assert all(row["tolerance"] == 0.03 for row in scores)
+
+
+def _history_of(response):
+    """Dig the accumulated history back out of a gate that chose to continue."""
+    for node in response.replace.jobs:
+        for job in node.jobs if hasattr(node, "jobs") else [node]:
+            if job.name.endswith("check 1"):
+                return job.function_args[6]
+    raise AssertionError("no following gate in the replacement flow")
+
+
+def test_the_history_does_not_carry_the_fitted_potentials(tmp_path):
+    # It is passed into every later gate, so anything kept in it is stored once
+    # per remaining iteration.
+    from autoplex_soap_turbo.flows.iterative_dipole import convergence_gate
+
+    settings = gated_settings(tmp_path)
+    response = run(
+        convergence_gate,
+        {"frames": {"train": [], "test": []}},
+        {"source": "generated", "n_frames": 20},
+        {"iteration": 0, "n_train": 40, "potential": {"files": ["megabytes"]},
+         "test_error": {"rmse_component": 0.1}},
+        {"iteration": 0, "n_frames": 20, "errors": {"rmse_component": 0.5}},
+        settings.as_dict(),
+        0,
+        [],
+    )
+    history = _history_of(response)
+    assert "potential" not in history[0]["fit"]
+    assert history[0]["fit"]["test_error"] == {"rmse_component": 0.1}
+
+
+def test_the_validation_walk_inherits_the_protocol_but_not_the_random_stream(tmp_path):
+    from autoplex_soap_turbo.flows.iterative_dipole import _validation_sampling_config
+
+    settings = gated_settings(tmp_path, seed_offset=1000)
+    settings.sampling.mc = {"mc_nsteps": 600, "mc_max_dist": 3.5}
+    settings.validation.sampling = {"mc": {"mc_nsteps": 1000}}
+
+    patched = _validation_sampling_config(settings, settings.as_dict())
+
+    assert patched["sampling"]["mc"]["mc_nsteps"] == 1000
+    # Merged, not replaced: losing mc_max_dist would give a walk that runs to
+    # completion and rejects almost every insertion.
+    assert patched["sampling"]["mc"]["mc_max_dist"] == 3.5
+    assert patched["sampling"]["mc_mu"] == [-7.0]
+    assert patched["dataset"]["seed"] == settings.dataset.seed + 1000
+    # Nothing has been fitted when this walk runs.
+    assert patched["sampling"]["carry_dipole_model"] is False
+
+
+def test_a_file_supplied_validation_set_needs_no_sampling_or_dft(tmp_path):
+    from autoplex_soap_turbo.data.dataset import write_dataset
+
+    write_dataset(tmp_path / "bench.xyz", [water(jitter=0.05, seed=99 + i) for i in range(8)])
+    settings = gated_settings(tmp_path, source="file", file="bench.xyz")
+    names = [node.name for node in iterative_dipole_training(settings).jobs]
+
+    assert "gated: validation set" in names
+    assert "gated: validation sample" not in names
+
+
+def test_a_grand_canonical_walk_reports_that_it_carried_the_dipole_model(
+    settings, tmp_path, monkeypatch
+):
+    """Keyed off the MD settings alone, this said `false` for every GCMC run.
+
+    `n_with_predicted_dipole` and `carried_dipole_model` are two of the counts
+    the guide tells you to check, so a false negative here reads as a turboGAP
+    build without dipole support.
+    """
+    import autoplex_soap_turbo.turbogap.md as md_module
+
+    potential = tmp_path / "frozen.gap"
+    potential.write_text("")
+    settings.sampling.method = "gcmc"
+    settings.sampling.energy_potential = str(potential)
+    settings.sampling.mc_species = ["OH2"]
+    settings.sampling.mc_mu = [-1.0]
+    settings.sampling.carry_dipole_model = True
+
+    seen = {}
+
+    def fake_sample(existing, *, mc_settings=None, md_settings=None, **kwargs):
+        seen["mc"] = mc_settings
+        return [water(seed=1)], "gcmc"
+
+    monkeypatch.setattr(md_module, "sample_structures", fake_sample)
+
+    from autoplex_soap_turbo.payload import files_to_payload
+
+    dipole_xml = tmp_path / "dipole.xml"
+    dipole_xml.write_text("<GAP_params/>")
+
+    prepared = run(prepare_dataset, settings.as_dict())
+    fit_result = {"iteration": 0, "potential": files_to_payload([dipole_xml])}
+    monkeypatch.chdir(tmp_path)
+    result = run(sample_candidates, prepared, fit_result, settings.as_dict(), 0)
+
+    assert seen["mc"] is not None, "the grand-canonical sampler should have run"
+    assert seen["mc"].dipole_potential_file is not None
+    assert result["carried_dipole_model"] is True

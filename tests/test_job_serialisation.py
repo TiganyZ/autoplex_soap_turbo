@@ -100,3 +100,121 @@ def test_every_stage_of_the_dipole_flow_serialises(tmp_path):
     for node in flow.jobs:
         jsanitize(node.function_args, strict=True)
         jsanitize(node.function_kwargs, strict=True)
+
+
+def test_every_stage_of_a_gated_flow_serialises(tmp_path):
+    """The same, for the convergence-gated shape.
+
+    A gated flow carries two things the fixed one does not: the validation set
+    reference, threaded through every iteration, and the accumulated `history`
+    that each gate hands to the next.
+    """
+    import yaml
+
+    from autoplex_soap_turbo.config import TrainingConfig
+    from autoplex_soap_turbo.data.dataset import write_dataset
+    from autoplex_soap_turbo.flows.iterative_dipole import iterative_dipole_training
+
+    write_dataset(tmp_path / "seed.xyz", [water(i) for i in range(12)])
+    (tmp_path / "hypers.yaml").write_text(
+        yaml.safe_dump({"GAP": {"general": {"soap": False, "soap_turbo": True}}})
+    )
+    settings_file = tmp_path / "training.yaml"
+    settings_file.write_text(
+        yaml.safe_dump(
+            {
+                "name": "gated",
+                "species_list": ["H", "O"],
+                "iterations": 2,
+                "dataset": {"initial": "seed.xyz", "box": 20.0},
+                "fit": {"hyperparameters_file": "hypers.yaml"},
+                "selection": {"n_select": 4},
+                "sampling": {
+                    "method": "turbogap_md",
+                    "n_candidates": 8,
+                    "energy_potential": "frozen.xml",
+                },
+                "vasp": {"worker": "roihu_cpu_vasp"},
+                "energy_fit": {"enabled": False},
+                "validation": {
+                    "enabled": True,
+                    "tolerance": 0.02,
+                    "max_iterations": 4,
+                },
+            }
+        )
+    )
+
+    flow = iterative_dipole_training(TrainingConfig.from_file(settings_file))
+
+    def check(nodes):
+        for node in nodes:
+            if hasattr(node, "jobs"):
+                check(node.jobs)
+                continue
+            jsanitize(node.function_args, strict=True)
+            jsanitize(node.function_kwargs, strict=True)
+
+    check(flow.jobs)
+
+
+def test_a_gates_replacement_flow_serialises_too(tmp_path):
+    """The jobs a gate builds at run time never pass through flow construction.
+
+    They are serialised when the gate returns, on a worker, an iteration into a
+    run -- which is the most expensive place to discover an unserialisable
+    argument.
+    """
+    import yaml
+
+    from autoplex_soap_turbo.config import TrainingConfig
+    from autoplex_soap_turbo.data.dataset import write_dataset
+    from autoplex_soap_turbo.flows.iterative_dipole import convergence_gate
+
+    write_dataset(tmp_path / "seed.xyz", [water(i) for i in range(12)])
+    (tmp_path / "hypers.yaml").write_text(
+        yaml.safe_dump({"GAP": {"general": {"soap": False, "soap_turbo": True}}})
+    )
+    settings_file = tmp_path / "training.yaml"
+    settings_file.write_text(
+        yaml.safe_dump(
+            {
+                "name": "gated",
+                "species_list": ["H", "O"],
+                "iterations": 2,
+                "dataset": {"initial": "seed.xyz", "box": 20.0},
+                "fit": {"hyperparameters_file": "hypers.yaml"},
+                "selection": {"n_select": 4},
+                "sampling": {
+                    "method": "turbogap_md",
+                    "n_candidates": 8,
+                    "energy_potential": "frozen.xml",
+                },
+                "vasp": {"worker": "roihu_cpu_vasp"},
+                "energy_fit": {"enabled": False},
+                "validation": {
+                    "enabled": True,
+                    "tolerance": 0.02,
+                    "max_iterations": 4,
+                },
+            }
+        )
+    )
+    settings = TrainingConfig.from_file(settings_file)
+
+    response = convergence_gate.__wrapped__(
+        {"frames": {"train": frames_to_payload([water(0)]), "test": []}},
+        {"source": "generated", "n_frames": 4,
+         "frames": frames_to_payload([water(1)])},
+        {"iteration": 0, "n_train": 9, "test_error": {"rmse_component": 0.1}},
+        {"iteration": 0, "n_frames": 4, "errors": {"rmse_component": 0.9}},
+        settings.as_dict(),
+        0,
+        [],
+    )
+
+    assert response.replace is not None
+    for node in response.replace.jobs:
+        for inner in node.jobs if hasattr(node, "jobs") else [node]:
+            jsanitize(inner.function_args, strict=True)
+            jsanitize(inner.function_kwargs, strict=True)

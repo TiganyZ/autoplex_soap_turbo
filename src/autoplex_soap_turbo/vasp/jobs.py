@@ -46,12 +46,30 @@ logger = logging.getLogger(__name__)
 #: tensor the polarizability is derived from. Neither is on by default, and
 #: without them the run succeeds and the harvest has nothing to collect.
 #:
-#: ``LDIPOL``/``IDIPOL`` are *not* set here. They are the fallback dipole route,
-#: and VASP does not accept them together with ``LEPSILON`` in every version --
-#: so the default asks for the combination that does work, and the correction
-#: route is available by putting it in ``user_incar_settings``.
+#: ``IDIPOL = 4`` is the dipole route, not ``LCALCPOL``, and not ``LDIPOL``.
+#:
+#: All three were run against an LiF monomer in a 15 A box, where the geometry
+#: fixes the answer independently and experiment fixes it again (6.3247 D =
+#: 1.3167 e*Angstrom). They agree -- 1.278, 1.276 and 1.286 e*Angstrom -- so the
+#: choice between them is about robustness, not accuracy:
+#:
+#: * ``LDIPOL = .TRUE.`` adds a compensating potential across the vacuum. In a
+#:   cell that is mostly vacuum this sloshes: the monomer's SCF reached 1e-5,
+#:   jumped several eV and oscillated for 30+ steps without settling. The
+#:   training set wants the dipole, not the energy correction, so the potential
+#:   term is pure downside.
+#: * ``LCALCPOL`` gives a Berry-phase polarization, which is defined only modulo
+#:   e*R. Folding it back is unambiguous only while the dipole is under half a
+#:   cell vector, and a large cluster in a tight box can alias silently.
+#: * ``IDIPOL = 4`` alone makes VASP report ``dipolmoment`` from the converged
+#:   density, with no potential term and no modulo ambiguity.
 DEFAULT_RESPONSE_INCAR: dict = {
-    "LCALCPOL": True,
+    "IDIPOL": 4,
+    # Pin the reference point to the cell centre. Left unset VASP re-derives it
+    # from the density each step, and a reference point that moves is another
+    # way the SCF fails to settle.
+    "DIPOL": "0.5 0.5 0.5",
+    # The dielectric tensor the polarizability is derived from.
     "LEPSILON": True,
     # A dipole is a property of the charge density, so it wants a converged one.
     "EDIFF": 1e-7,
@@ -62,6 +80,14 @@ DEFAULT_RESPONSE_INCAR: dict = {
     "LWAVE": False,
     "LCHARG": False,
     "ISYM": 0,
+    "ALGO": "Normal",
+    # Damped charge-density mixing, because an isolated cluster in a large box
+    # is ~99% vacuum and the defaults are not written for that. Same diagnosis
+    # as the LDIPOL note above: without this the SCF oscillates rather than
+    # failing, so the run burns its wall clock and returns nothing.
+    "AMIX": 0.1,
+    "BMIX": 0.01,
+    "AMIN": 0.01,
     # Forces are a fitting target, not a diagnostic: they come out of the SCF
     # already being paid for, and they are what turboGAP MD integrates.
     "NSW": 0,
@@ -121,13 +147,17 @@ class VaspDipoleSettings:
         incar = dict(DEFAULT_RESPONSE_INCAR)
         incar.update(self.user_incar_settings)
 
+        # IDIPOL alone is enough: it makes VASP compute and print the dipole.
+        # LDIPOL additionally applies the compensating potential, which is a
+        # separate decision and not one this workflow needs.
         has_berry = bool(incar.get("LCALCPOL"))
-        has_correction = bool(incar.get("LDIPOL")) and incar.get("IDIPOL") is not None
+        has_correction = incar.get("IDIPOL") is not None
         if not has_berry and not has_correction:
             raise ValueError(
-                "neither LCALCPOL nor LDIPOL+IDIPOL is set, so VASP will not "
-                "report a dipole and there will be nothing to fit. Set "
-                "LCALCPOL=True, or LDIPOL=True with IDIPOL=4."
+                "neither IDIPOL nor LCALCPOL is set, so VASP will not report a "
+                "dipole and there will be nothing to fit. Set IDIPOL=4, which "
+                "is the default here, or LCALCPOL=True for the Berry-phase "
+                "route."
             )
 
         # Not an error: someone may want dipoles alone. But it is easy to switch
@@ -139,12 +169,14 @@ class VaspDipoleSettings:
                 "and no polarizability can be derived. Dipoles alone will be "
                 "harvested."
             )
-        if incar.get("LEPSILON") and incar.get("LDIPOL"):
+        if incar.get("LDIPOL"):
             logger.warning(
-                "LEPSILON and LDIPOL are both set. Some VASP versions refuse "
-                "that combination outright; if the run dies in the first "
-                "electronic step, drop LDIPOL and take the dipole from "
-                "LCALCPOL instead."
+                "LDIPOL is on, which applies the dipole correction to the "
+                "potential rather than only reporting the dipole. In a cell "
+                "that is mostly vacuum this destabilises the SCF -- measured on "
+                "an LiF monomer, it oscillated for 30+ steps without reaching "
+                "EDIFF, against 19 steps with IDIPOL alone. Drop LDIPOL unless "
+                "you specifically want the corrected energy."
             )
         if incar.get("NSW"):
             logger.warning(

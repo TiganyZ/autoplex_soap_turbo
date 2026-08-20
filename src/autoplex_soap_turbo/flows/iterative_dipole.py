@@ -12,9 +12,15 @@ bookkeeping wherever is convenient. Nothing is passed between them as a
 filesystem path -- the dataset and the potential travel through the job store,
 because those machines share no filesystem.
 
-The whole loop is built up front rather than with dynamic replacement: the
-number of iterations is known, and a static flow is one that can be inspected,
-paused and restarted per job with ``jf job``.
+The loop is built up front when the number of iterations is known, because a
+static flow is one that can be inspected, paused and restarted per job with
+``jf job``. Turning on the ``validation`` section replaces that with a gated
+loop: each iteration is scored against an independent test set -- its own
+turboGAP walk and its own DFT batch, computed once and never trained on -- and
+the run continues only while the model is still above tolerance and still within
+its iteration budget. That loop cannot be built up front, because how many
+iterations it takes is the thing being measured, so the jobs after the first
+appear as the run decides to need them.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from jobflow import Flow, job
+from jobflow import Flow, Response, job
 
 from autoplex_soap_turbo.config import TrainingConfig
 from autoplex_soap_turbo.data.dataset import (
@@ -450,8 +456,13 @@ def sample_candidates(
         # be traced back to the fit that motivated it.
         "fitted_test_rmse": (fit_result.get("test_error") or {}).get("rmse_component"),
         "energy_potential_source": energy_potential_source,
-        "carried_dipole_model": md_settings is not None
-        and md_settings.dipole_potential_file is not None,
+        # Either sampler can carry it, so ask whichever one ran. Keyed off
+        # md_settings alone, a grand-canonical walk that did carry the dipole
+        # model reported that it had not.
+        "carried_dipole_model": any(
+            s is not None and s.dipole_potential_file is not None
+            for s in (md_settings, mc_settings)
+        ),
         "n_with_predicted_dipole": sum(
             1 for frame in candidates if "predicted_dipole" in frame.info
         ),
@@ -562,6 +573,292 @@ def merge_dataset(dataset: dict, harvested: dict, config: dict, iteration: int) 
     }
 
 
+# --------------------------------------------------------------- validation ---
+#
+# The independent test set, and the gate that decides whether to keep going.
+#
+# `dataset.train_fraction` already holds frames back, but those come from the
+# same sampler and the same DFT batch as the training frames, so they measure
+# interpolation within the data the loop generated for itself. A training loop
+# that stops on that number stops when it has learned its own sampler. The set
+# built here comes from a separate walk and a separate DFT batch, is computed
+# once before any fitting happens, and is never merged into the dataset -- so
+# every iteration is scored on identical frames that none of them saw.
+
+
+@job(data="frames")
+def load_test_set(config: dict) -> dict:
+    """Read a fixed validation set from a file, in the dataset's conventions.
+
+    The route for a benchmark you want to keep across runs, or one computed by
+    something other than this workflow. Same conversions as
+    :func:`prepare_dataset`, because the model is scored in the fitting
+    convention and a set in the file's convention would be wrong by whatever
+    the two differ by -- silently, and in a way that looks like model error.
+    """
+    settings = TrainingConfig(**_rehydrate(config))
+    dataset = settings.dataset
+
+    path = settings.resolve(settings.validation.file)
+    frames = read_dataset(path)
+    frames = drop_info_keys(frames, dataset.drop_info_keys)
+    frames = ensure_cell(
+        frames,
+        box=dataset.box,
+        min_vacuum=dataset.min_vacuum,
+        periodic=dataset.periodic,
+    )
+    frames = convert_dataset_units(
+        frames,
+        dipole_unit=dataset.dipole_unit,
+        polarizability_unit=dataset.polarizability_unit,
+        dipole_key=dataset.dipole_key,
+        polarizability_key=dataset.polarizability_key,
+    )
+    with_target = frames_with_target(frames, dataset.dipole_key)
+    if not with_target:
+        raise ValueError(
+            f"no frame in {path} carries a '{dataset.dipole_key}' entry, so the "
+            "validation set cannot score anything. This is the failure that "
+            "otherwise reports a perfect run: an empty test set produces no "
+            "error, and no error reads as converged."
+        )
+
+    logger.info("validation set: %d frames from %s", len(with_target), path)
+    return {
+        "source": str(path),
+        "n_frames": len(with_target),
+        "summary": dataset_summary(with_target, dataset.dipole_key),
+        "frames": frames_to_payload(with_target),
+    }
+
+
+@job(data="frames")
+def harvest_test_set(harvested: dict, config: dict) -> dict:
+    """Turn the validation DFT batch into the fixed set the gate scores on.
+
+    Takes the same output shape the per-iteration reference stage produces, so
+    the generated and the file-supplied route hand the gate the same thing.
+    """
+    settings = TrainingConfig(**_rehydrate(config))
+    dataset = settings.dataset
+
+    frames = as_atoms(harvested.get("frames", []))
+    frames = convert_dataset_units(
+        frames,
+        dipole_key=dataset.dipole_key,
+        polarizability_key=dataset.polarizability_key,
+    )
+    with_target = frames_with_target(frames, dataset.dipole_key)
+    if not with_target:
+        raise ValueError(
+            f"the validation DFT batch returned {len(frames)} frames but none "
+            f"carries a '{dataset.dipole_key}'. Without a test set there is "
+            "nothing for the convergence gate to measure, and a gate with "
+            "nothing to measure would let the run stop at the first iteration."
+        )
+
+    logger.info("validation set: %d frames from the reference batch", len(with_target))
+    return {
+        "source": "generated",
+        "n_frames": len(with_target),
+        "summary": dataset_summary(with_target, dataset.dipole_key),
+        "frames": frames_to_payload(with_target),
+    }
+
+
+@job
+def evaluate_on_test_set(
+    fit_result: dict, test_set: dict, config: dict, iteration: int
+) -> dict:
+    """Score one iteration's dipole model on the independent set.
+
+    Runs on the fitting worker: it needs the same ``quip`` build the fit used,
+    and the potential is already there as a payload.
+    """
+    from autoplex_soap_turbo.fitting.dipole_gap import (  # noqa: PLC0415
+        dipole_errors,
+        run_quip_dipole,
+    )
+
+    settings = TrainingConfig(**_rehydrate(config))
+    reference = as_atoms(test_set["frames"])
+
+    workdir = Path.cwd() / f"validate_iteration_{iteration}"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    potential_dir = workdir / "potential"
+    payload_to_files(fit_result["potential"], potential_dir)
+    gap_file = potential_dir / main_file(fit_result["potential"], ".xml")
+
+    dataset_file = write_dataset(workdir / "validation.extxyz", reference)
+    predicted = run_quip_dipole(
+        dataset_file, gap_file, workdir / "validation_predicted.extxyz", workdir=workdir
+    )
+    errors = dipole_errors(
+        reference, predicted, reference_key=settings.dataset.dipole_key
+    )
+
+    logger.info(
+        "iteration %d: validation %s", iteration, describe_errors(errors)
+    )
+    return {"iteration": iteration, "errors": errors, "n_frames": len(reference)}
+
+
+def _fit_digest(result: dict | None, energy: bool = False) -> dict | None:
+    """The part of a fit result the summary needs, without the potential."""
+    if not result:
+        return None
+    keys = ["iteration", "n_train", "n_test", "train_error", "test_error"]
+    if energy:
+        keys += ["skipped", "reason"]
+    return {key: result.get(key) for key in keys if key in result}
+
+
+@job(data="frames")
+def convergence_gate(
+    dataset: dict,
+    test_set: dict,
+    fit_result: dict,
+    validation_result: dict,
+    config: dict,
+    iteration: int,
+    history: list[dict],
+    energy_fit_result: dict | None = None,
+) -> Response:
+    """Stop the run, or build the next iteration.
+
+    This is the job that makes the loop a loop. It has the only information that
+    can decide: the error of the model just fitted, on frames nothing was fitted
+    to. Below tolerance, or out of budget, and it returns the run summary.
+    Otherwise it replaces itself with the rest of this iteration -- sample,
+    select, reference DFT, merge -- followed by the next iteration, which is
+    built the same way and ends in another gate.
+
+    Building the *rest* of the iteration here rather than before the gate is
+    deliberate: a converged model should not have already spent a DFT batch
+    generating data for an iteration that will not happen.
+    """
+    settings = TrainingConfig(**_rehydrate(config))
+    validation = settings.validation
+
+    errors = validation_result.get("errors") or {}
+    rmse = errors.get("rmse_component")
+    record = {
+        "iteration": iteration,
+        "n_train": fit_result.get("n_train"),
+        "n_validation": validation_result.get("n_frames"),
+        "validation_rmse": rmse,
+        "validation_r2": errors.get("r2_component"),
+        "tolerance": validation.tolerance,
+    }
+    # Carried alongside the scores so the summary can report per-iteration fit
+    # errors without a second pass over the job store -- but only the error
+    # metrics. `history` is passed into every later gate, so anything kept here
+    # is stored once per remaining iteration; the fitted potential is megabytes
+    # and is already in the store under its own job.
+    record["fit"] = _fit_digest(fit_result)
+    record["energy_fit"] = _fit_digest(energy_fit_result, energy=True)
+    history = [*history, record]
+
+    fits = [entry["fit"] for entry in history if entry.get("fit")]
+    energy_fits = [
+        entry["energy_fit"] for entry in history if entry.get("energy_fit")
+    ]
+    scores = [
+        {k: v for k, v in entry.items() if k not in ("fit", "energy_fit")}
+        for entry in history
+    ]
+
+    reached_budget = iteration + 1 >= validation.max_iterations
+    below_tolerance = rmse is not None and rmse <= validation.tolerance
+    too_early = iteration + 1 < validation.min_iterations
+
+    if rmse is None:
+        # Not a reason to stop -- a missing score means the measurement failed,
+        # not that the model is good. Say so loudly and spend another iteration.
+        logger.warning(
+            "iteration %d produced no validation RMSE; treating it as not "
+            "converged rather than as converged.",
+            iteration,
+        )
+
+    if below_tolerance and too_early:
+        logger.info(
+            "iteration %d is within tolerance (%.5f <= %.5f e*Angstrom) but "
+            "validation.min_iterations is %d, so the run continues.",
+            iteration, rmse, validation.tolerance, validation.min_iterations,
+        )
+
+    stop = (below_tolerance and not too_early) or reached_budget
+    if stop:
+        if below_tolerance and not too_early:
+            reason = (
+                f"validation RMSE {rmse:.5f} e*Angstrom is at or below the "
+                f"tolerance of {validation.tolerance} after {iteration + 1} "
+                "iteration(s)"
+            )
+            logger.info("converged: %s", reason)
+        else:
+            reason = (
+                f"reached validation.max_iterations ({validation.max_iterations}) "
+                f"with a validation RMSE of "
+                f"{'unmeasured' if rmse is None else format(rmse, '.5f')} "
+                f"against a tolerance of {validation.tolerance}"
+            )
+            # A budget exhausted is a run that did not converge. Reporting it as
+            # a completed run is how an under-trained model gets shipped.
+            logger.warning("stopping without converging: %s", reason)
+
+        summary = _summarise(fits, config, energy_fits, validation=scores)
+        summary.update(
+            converged=bool(below_tolerance and not too_early),
+            stopped_because=reason,
+            iterations_run=iteration + 1,
+            validation_tolerance=validation.tolerance,
+            max_iterations=validation.max_iterations,
+            validation_source=test_set.get("source"),
+            n_validation_frames=test_set.get("n_frames"),
+        )
+        return Response(output=summary)
+
+    logger.info(
+        "iteration %d: validation RMSE %s above the tolerance of %s; "
+        "continuing (%d of %d iterations used)",
+        iteration,
+        "unmeasured" if rmse is None else format(rmse, ".5f"),
+        validation.tolerance,
+        iteration + 1,
+        validation.max_iterations,
+    )
+
+    sample = sample_candidates(
+        dataset, fit_result, config, iteration, energy_fit_result=energy_fit_result
+    )
+    sample.name = f"{settings.name}: sample {iteration}"
+    apply_worker(sample, settings.sampling)
+
+    select = select_structures(sample.output, dataset, config, iteration)
+    select.name = f"{settings.name}: select {iteration}"
+
+    reference = _reference_stage(select.output, settings, iteration)
+
+    merge = merge_dataset(dataset, reference.output, config, iteration)
+    merge.name = f"{settings.name}: merge {iteration}"
+
+    following = _iteration_flow(
+        merge.output, test_set, settings, config, iteration + 1, history
+    )
+
+    return Response(
+        replace=Flow(
+            [sample, select, reference, merge, following],
+            output=following.output,
+            name=f"{settings.name}: iteration {iteration + 1}",
+        )
+    )
+
+
 # ------------------------------------------------------------------ report ---
 
 
@@ -576,6 +873,21 @@ def summarise_run(
     Both models appear, keyed by iteration, because they are fitted to the same
     frames and the interesting question at the end of a run is whether they
     improved together.
+    """
+    return _summarise(fit_results, config, energy_fit_results)
+
+
+def _summarise(
+    fit_results: list[dict],
+    config: dict,
+    energy_fit_results: list[dict] | None = None,
+    validation: list[dict] | None = None,
+) -> dict:
+    """The body of :func:`summarise_run`, callable without being a job.
+
+    The convergence gate ends a gated run from inside a job that is already
+    running, so it needs the summary as a value rather than as another job to
+    schedule.
     """
     settings = TrainingConfig(**_rehydrate(config))
 
@@ -669,6 +981,11 @@ def summarise_run(
             else None
         ),
         "units": "dipole: e*Angstrom per component; energy: meV/atom; forces: eV/Angstrom",
+        # Present only for a gated run. These are the numbers the loop actually
+        # stopped on -- measured on frames no iteration trained on -- and they
+        # are not the same as "test_rmse" above, which is the held-out slice of
+        # the training data.
+        "validation": list(validation) if validation else None,
     }
 
 
@@ -709,6 +1026,7 @@ def _rehydrate(config: dict) -> dict:
         FitSettings,
         SamplingSettings,
         SelectionSettings,
+        ValidationSettings,
         VaspSettings,
     )
 
@@ -720,6 +1038,7 @@ def _rehydrate(config: dict) -> dict:
         "energy_fit": EnergyFitSettings,
         "sampling": SamplingSettings,
         "selection": SelectionSettings,
+        "validation": ValidationSettings,
     }
     data = dict(config)
     for key, model in models.items():
@@ -745,6 +1064,16 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
         Ready to hand to ``jobflow_remote.submit_flow`` or ``jobflow.run_locally``.
         Its output is the run summary; the fitted potentials are in the
         per-iteration fit job outputs.
+
+    Notes
+    -----
+    Two shapes, chosen by ``validation.enabled``. Without it the loop runs
+    ``iterations`` times and every job exists before submission, so ``jf job
+    list`` shows the whole run from the start. With it the loop is gated on an
+    independent test set and stops as soon as the model clears
+    ``validation.tolerance``, so only the first iteration's jobs exist up front
+    and the rest appear as the gate decides to need them -- and ``iterations``
+    is superseded by ``validation.max_iterations``.
     """
     # Read the hyperparameter files here, on the machine that has them, and
     # carry their contents in the settings. Every stage after this one runs
@@ -755,6 +1084,9 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
     prepare = prepare_dataset(config)
     prepare.name = f"{settings.name}: prepare dataset"
     jobs: list = [prepare]
+
+    if settings.validation.enabled:
+        return _gated_training(prepare, jobs, settings, config)
 
     dataset_ref = prepare.output
     fit_outputs = []
@@ -816,6 +1148,156 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
     return Flow(jobs, output=summary.output, name=settings.name)
 
 
+def _gated_training(prepare, jobs: list, settings: TrainingConfig, config: dict) -> Flow:
+    """The convergence-gated shape of the run.
+
+    Build the fixed test set, then the first iteration. Everything after that is
+    the gate's business: it is the only thing that knows whether the model is
+    good enough yet.
+    """
+    validation = settings.validation
+    if settings.iterations != validation.max_iterations:
+        logger.info(
+            "validation is enabled, so the run is bounded by "
+            "validation.max_iterations (%d); the top-level 'iterations' setting "
+            "(%d) is not used.",
+            validation.max_iterations,
+            settings.iterations,
+        )
+
+    test_jobs, test_set = _test_set_stage(prepare.output, settings, config)
+    jobs.extend(test_jobs)
+
+    first = _iteration_flow(prepare.output, test_set, settings, config, 0, [])
+    jobs.append(first)
+
+    return Flow(jobs, output=first.output, name=settings.name)
+
+
+def _iteration_flow(
+    dataset_ref,
+    test_set,
+    settings: TrainingConfig,
+    config: dict,
+    iteration: int,
+    history: list[dict],
+) -> Flow:
+    """One gated iteration: fit, score against the fixed set, then decide.
+
+    Everything after the decision -- sampling, DFT, merging, and the iteration
+    that follows -- is built by the gate itself, at run time, because whether
+    any of it happens depends on the score.
+    """
+    fit = fit_dipole_model(dataset_ref, config, iteration)
+    fit.name = f"{settings.name}: fit {iteration}"
+    apply_worker(fit, settings.fit)
+    jobs = [fit]
+
+    energy_fit_output = None
+    if settings.energy_fit.enabled:
+        energy_fit = fit_energy_model(dataset_ref, config, iteration)
+        energy_fit.name = f"{settings.name}: energy fit {iteration}"
+        apply_worker(
+            energy_fit,
+            settings.energy_fit if settings.energy_fit.worker else settings.fit,
+        )
+        jobs.append(energy_fit)
+        energy_fit_output = energy_fit.output
+
+    evaluate = evaluate_on_test_set(fit.output, test_set, config, iteration)
+    evaluate.name = f"{settings.name}: validate {iteration}"
+    # quip, and the potential, are both on the fitting worker.
+    apply_worker(evaluate, settings.fit)
+    jobs.append(evaluate)
+
+    gate = convergence_gate(
+        dataset_ref,
+        test_set,
+        fit.output,
+        evaluate.output,
+        config,
+        iteration,
+        history,
+        energy_fit_result=energy_fit_output,
+    )
+    gate.name = f"{settings.name}: check {iteration}"
+    jobs.append(gate)
+
+    return Flow(
+        jobs, output=gate.output, name=f"{settings.name}: iteration {iteration}"
+    )
+
+
+def _validation_sampling_config(settings: TrainingConfig, config: dict) -> dict:
+    """The settings the test-set walk runs under.
+
+    The same protocol as the training sampler by default -- the point of the set
+    is to measure the model where it will be used -- but from a different random
+    stream, and with the dipole model switched off, since there is no fitted
+    model to carry when this runs. ``validation.sampling`` overrides key by key,
+    including one level into the ``mc`` block.
+    """
+    from copy import deepcopy  # noqa: PLC0415
+
+    patched = deepcopy(config)
+    sampling = dict(patched.get("sampling") or {})
+    overrides = deepcopy(settings.validation.sampling)
+
+    # `mc` merges key by key rather than being replaced wholesale. Overriding
+    # just `mc_nsteps` and silently losing `mc_max_dist` would be a walk that
+    # runs to completion and rejects almost every insertion -- which is the one
+    # failure in this workflow that reports success.
+    if isinstance(overrides.get("mc"), dict):
+        merged_mc = dict(sampling.get("mc") or {})
+        merged_mc.update(overrides.pop("mc"))
+        sampling["mc"] = merged_mc
+    sampling.update(overrides)
+    # Nothing has been fitted when the test set is generated, so there is no
+    # dipole model to write into the potential file.
+    sampling["carry_dipole_model"] = False
+    patched["sampling"] = sampling
+
+    dataset = dict(patched.get("dataset") or {})
+    dataset["seed"] = int(dataset.get("seed", 0)) + settings.validation.seed_offset
+    patched["dataset"] = dataset
+
+    selection = dict(patched.get("selection") or {})
+    selection["n_select"] = settings.validation.n_select
+    patched["selection"] = selection
+    return patched
+
+
+def _test_set_stage(dataset_ref, settings: TrainingConfig, config: dict):
+    """Build the independent validation set. Returns ``(jobs, test_set_ref)``.
+
+    Runs once, before any fitting. With ``source: file`` that is a single read;
+    with ``source: generate`` it is a full sampler-plus-DFT pass on its own
+    workers -- the same two clusters the loop itself uses.
+    """
+    if settings.validation.source == "file":
+        load = load_test_set(config)
+        load.name = f"{settings.name}: validation set"
+        return [load], load.output
+
+    validation_config = _validation_sampling_config(settings, config)
+
+    # `-1` marks these as the pre-loop pass: it keeps their job names and their
+    # working directories from colliding with iteration 0's.
+    sample = sample_candidates(dataset_ref, {}, validation_config, -1)
+    sample.name = f"{settings.name}: validation sample"
+    apply_worker(sample, settings.sampling)
+
+    select = select_structures(sample.output, dataset_ref, validation_config, -1)
+    select.name = f"{settings.name}: validation select"
+
+    reference = _reference_stage(select.output, settings, -1)
+
+    harvest = harvest_test_set(reference.output, config)
+    harvest.name = f"{settings.name}: validation set"
+
+    return [sample, select, reference, harvest], harvest.output
+
+
 def _reference_stage(selected, settings: TrainingConfig, iteration: int):
     """The reference-DFT batch for one iteration, pinned to its worker.
 
@@ -827,6 +1309,16 @@ def _reference_stage(selected, settings: TrainingConfig, iteration: int):
     if settings.reference_backend() == "vasp":
         return _vasp_stage(selected, settings, iteration)
     return _aims_stage(selected, settings, iteration)
+
+
+def _stage_label(iteration: int) -> str:
+    """How a stage names its iteration.
+
+    Iteration ``-1`` is the pass that builds the validation set, before the loop
+    starts. Calling it "-1" in `jf job list` would read as a bug rather than as
+    a deliberate marker.
+    """
+    return "validation" if iteration < 0 else str(iteration)
 
 
 def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
@@ -841,7 +1333,7 @@ def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
         molecular=settings.vasp.molecular,
         min_vacuum=settings.vasp.min_vacuum,
         strict_vacuum=settings.vasp.strict_vacuum,
-        name_prefix=f"{settings.name} vasp {iteration}",
+        name_prefix=f"{settings.name} vasp {_stage_label(iteration)}",
     )
     calculation = vasp_dipole_calculations(
         selected,
@@ -850,7 +1342,7 @@ def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
         polarizability_key=settings.dataset.polarizability_key,
         require_all=settings.vasp.require_all,
     )
-    calculation.name = f"{settings.name}: vasp {iteration}"
+    calculation.name = f"{settings.name}: vasp {_stage_label(iteration)}"
     # dynamic=True so the per-structure jobs this replaces itself with inherit
     # the worker too, rather than falling back to the project default.
     apply_worker(calculation, settings.vasp)
@@ -867,7 +1359,7 @@ def _aims_stage(selected, settings: TrainingConfig, iteration: int):
     aims_settings = AimsDipoleSettings(
         user_params=settings.aims.user_params,
         molecular=settings.aims.molecular,
-        name_prefix=f"{settings.name} aims {iteration}",
+        name_prefix=f"{settings.name} aims {_stage_label(iteration)}",
     )
     calculation = aims_dipole_calculations(
         selected,
@@ -875,7 +1367,7 @@ def _aims_stage(selected, settings: TrainingConfig, iteration: int):
         dipole_key=settings.dataset.dipole_key,
         polarizability_key=settings.dataset.polarizability_key,
     )
-    calculation.name = f"{settings.name}: aims {iteration}"
+    calculation.name = f"{settings.name}: aims {_stage_label(iteration)}"
     # dynamic=True so the per-structure jobs this replaces itself with inherit
     # the worker too, rather than falling back to the project default.
     apply_worker(calculation, settings.aims)

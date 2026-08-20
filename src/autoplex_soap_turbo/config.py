@@ -316,6 +316,80 @@ class SelectionSettings:
 
 
 @dataclass
+class ValidationSettings:
+    """An independent test set, and the convergence gate measured against it.
+
+    The ``train_fraction`` split in :class:`DatasetSettings` holds out frames
+    the sampler already produced, so it answers "how well does the model
+    interpolate within the data it was given?". That is not the question a
+    training loop should stop on. This section answers the other one: a
+    *separate* turboGAP walk, its own DFT batch, computed once before the loop
+    starts and never trained on, so every iteration is scored against the same
+    frames and none of them influenced the fit.
+
+    The loop then runs until the model clears :attr:`tolerance` on that set, or
+    until :attr:`max_iterations` iterations have been fitted -- whichever comes
+    first. Both are needed: without a tolerance the gate never fires, and
+    without a budget a model that cannot reach the tolerance runs forever.
+
+    Attributes
+    ----------
+    enabled
+        Off by default, which leaves the run a fixed ``iterations`` loop and the
+        flow's job list statically known. Turning it on makes the loop
+        data-dependent, so the jobs after the first iteration appear as the run
+        decides to need them.
+    source
+        ``"generate"`` runs the sampler and the DFT backend to make the set;
+        ``"file"`` reads one that already exists, which is the route for a
+        benchmark you want to keep across runs.
+    file
+        extxyz path, required when ``source`` is ``"file"``. Read with the same
+        unit conventions as ``dataset.initial``.
+    n_select
+        How many frames the generated test set holds.
+    seed_offset
+        Added to ``dataset.seed`` for the test-set walk, so it explores the same
+        protocol from a different random stream than the training sampler. Make
+        it large enough not to collide with the per-iteration offsets, which are
+        ``seed + iteration``.
+    sampling
+        Overrides applied on top of the ``sampling`` section for the test-set
+        walk only. Leave it empty to use the identical protocol -- which is
+        usually what you want, since the point is to measure the model on the
+        distribution it will be used on.
+    tolerance
+        Test RMSE per dipole component, in e*Angstrom, at or below which the
+        loop stops. Required when enabled.
+    max_iterations
+        The budget, and what ``iterations`` means for a gated run. Reached
+        without clearing the tolerance, the run stops and says so rather than
+        reporting success.
+    min_iterations
+        Fit at least this many times before the gate may stop the run. Guards
+        against a seed dataset that happens to score well on a test set the
+        model has not really learned.
+    """
+
+    enabled: bool = False
+    source: str = "generate"
+    file: str | None = None
+    n_select: int = 20
+    seed_offset: int = 1000
+    sampling: dict = field(default_factory=dict)
+    tolerance: float | None = None
+    max_iterations: int = 10
+    min_iterations: int = 1
+
+    def __post_init__(self):
+        allowed = {"generate", "file"}
+        if self.source not in allowed:
+            raise ConfigError(
+                f"validation.source is {self.source!r}; expected one of {sorted(allowed)}"
+            )
+
+
+@dataclass
 class TrainingConfig:
     """A complete iterative training run."""
 
@@ -333,6 +407,7 @@ class TrainingConfig:
     energy_fit: EnergyFitSettings = field(default_factory=EnergyFitSettings)
     sampling: SamplingSettings = field(default_factory=SamplingSettings)
     selection: SelectionSettings = field(default_factory=SelectionSettings)
+    validation: ValidationSettings = field(default_factory=ValidationSettings)
 
     #: Directory the relative paths in this file are resolved against.
     root: Path = field(default_factory=Path.cwd)
@@ -355,6 +430,7 @@ class TrainingConfig:
             "energy_fit": EnergyFitSettings,
             "sampling": SamplingSettings,
             "selection": SelectionSettings,
+            "validation": ValidationSettings,
         }
 
         # The reference backend is chosen by which section is written, so that
@@ -407,6 +483,84 @@ class TrainingConfig:
         path = Path(value)
         return path if path.is_absolute() else (self.root / path).resolve()
 
+    def _validation_problems(self) -> list[str]:
+        """Whether the convergence gate has everything it needs to fire.
+
+        Kept apart from :meth:`validate` because every one of these is a way to
+        get a run that looks like it converged when nothing measured it.
+        """
+        problems: list[str] = []
+        validation = self.validation
+
+        if validation.tolerance is None:
+            problems.append(
+                "validation.enabled is true but validation.tolerance is unset, "
+                "so there is no threshold to stop on and the run would simply "
+                "use up validation.max_iterations. Set a test RMSE in "
+                "e*Angstrom per component, or leave validation disabled."
+            )
+        elif validation.tolerance <= 0:
+            problems.append(
+                f"validation.tolerance must be positive, got {validation.tolerance}"
+            )
+
+        if validation.max_iterations < 1:
+            problems.append(
+                f"validation.max_iterations must be at least 1, got "
+                f"{validation.max_iterations}"
+            )
+        if validation.min_iterations < 1:
+            problems.append(
+                f"validation.min_iterations must be at least 1, got "
+                f"{validation.min_iterations}"
+            )
+        if validation.min_iterations > validation.max_iterations:
+            problems.append(
+                f"validation.min_iterations ({validation.min_iterations}) exceeds "
+                f"validation.max_iterations ({validation.max_iterations}); the "
+                "budget has to allow the minimum."
+            )
+
+        if validation.source == "file":
+            if not validation.file:
+                problems.append(
+                    "validation.source is 'file' but validation.file is unset."
+                )
+            elif not self.resolve(validation.file).is_file():
+                problems.append(
+                    f"validation.file does not exist: {self.resolve(validation.file)}"
+                )
+        else:
+            # Generating the set means walking before anything has been fitted.
+            # Only a frozen potential can do that. With a model fitted by this
+            # run, the test set would depend on the iteration that made it and
+            # would stop being a fixed benchmark -- which is the one property it
+            # exists to have.
+            if not self.sampling.energy_potential:
+                problems.append(
+                    "validation.source is 'generate', which walks the sampler "
+                    "before the first fit, but sampling.energy_potential is "
+                    "unset so there is no model to walk with. Either point it "
+                    "at a fixed potential (Mode B) or supply the test set "
+                    "directly with validation.source: file."
+                )
+            if validation.n_select < 1:
+                problems.append(
+                    f"validation.n_select must be at least 1, got "
+                    f"{validation.n_select}"
+                )
+
+        unknown = set(validation.sampling) - {
+            f.name for f in fields(SamplingSettings)
+        }
+        if unknown:
+            problems.append(
+                f"validation.sampling has unknown key(s) {sorted(unknown)}; it "
+                "overrides the 'sampling' section, so only its keys are valid."
+            )
+
+        return problems
+
     def validate(self) -> None:
         """Check the settings hang together before anything is submitted."""
         problems: list[str] = []
@@ -434,6 +588,9 @@ class TrainingConfig:
                 f"energy_fit.hyperparameters_file does not exist: "
                 f"{self.resolve(energy_hypers)}"
             )
+
+        if self.validation.enabled:
+            problems.extend(self._validation_problems())
 
         if self.sampling.method == "gcmc":
             exchanges = not self.sampling.mc_types or bool(

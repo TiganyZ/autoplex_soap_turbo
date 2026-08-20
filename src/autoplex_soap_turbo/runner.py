@@ -73,24 +73,65 @@ def _describe_energy_fit(settings: TrainingConfig) -> str:
     )
 
 
+def _describe_stopping(settings: TrainingConfig) -> str:
+    """How the run ends: a fixed count, or a measurement."""
+    validation = settings.validation
+    if not validation.enabled:
+        return f"after {settings.iterations} iterations (fixed)"
+    source = (
+        f"a set of {validation.n_select} frames from its own walk and DFT batch"
+        if validation.source == "generate"
+        else str(settings.resolve(validation.file))
+    )
+    return (
+        f"when the validation RMSE reaches {validation.tolerance} e*Angstrom "
+        f"per component, or after {validation.max_iterations} iterations "
+        f"(at least {validation.min_iterations}); measured against {source}"
+    )
+
+
+def _print_jobs(nodes, indent: str = "    ", index: int = 0) -> int:
+    """Print a flow's jobs, descending into nested flows.
+
+    A gated run nests each iteration in a flow of its own, so a flat listing
+    would show the iteration's name and none of its stages.
+    """
+    for node in nodes:
+        manager = getattr(node, "config", None)
+        worker = ""
+        if manager is not None:
+            worker = (getattr(manager, "manager_config", {}) or {}).get("worker", "")
+        if hasattr(node, "jobs"):
+            print(f"{indent}    {node.name}:")
+            index = _print_jobs(node.jobs, indent + "    ", index)
+            continue
+        print(f"{indent}{index:2d}. {node.name}{f'   [{worker}]' if worker else ''}")
+        index += 1
+    return index
+
+
 def describe(flow, settings: TrainingConfig) -> None:
     """Print what the flow will do, before anything is submitted."""
-    print(f"\nflow: {flow.name}  ({len(flow.jobs)} jobs)")
+    print(f"\nflow: {flow.name}")
     print(f"  species        : {', '.join(settings.species_list)}")
     print(f"  reference      : {settings.reference_backend()}")
-    print(f"  iterations     : {settings.iterations}")
+    print(f"  stops          : {_describe_stopping(settings)}")
     print(f"  seed dataset   : {settings.resolve(settings.dataset.initial)}")
     print(f"  hyperparameters: {settings.resolve(settings.fit.hyperparameters_file)}")
     print(f"  sampling       : {_describe_sampling(settings)}")
     print(f"  new frames/iter: {settings.selection.n_select}")
     print(f"  energy model   : {_describe_energy_fit(settings)}")
     print("\n  jobs:")
-    for index, node in enumerate(flow.jobs):
-        manager = getattr(node, "config", None)
-        worker = ""
-        if manager is not None:
-            worker = (getattr(manager, "manager_config", {}) or {}).get("worker", "")
-        print(f"    {index:2d}. {node.name}{f'   [{worker}]' if worker else ''}")
+    _print_jobs(flow.jobs)
+    if settings.validation.enabled:
+        # Saying the job count here would be saying how many iterations the run
+        # takes, which is the thing it is about to go and measure.
+        print(
+            "\n  Only the first iteration is built up front. Each one ends in a\n"
+            "  check that either stops the run or builds the next, so the rest\n"
+            "  of the jobs appear in `jf job list` as the run decides to need\n"
+            "  them."
+        )
     print()
 
 

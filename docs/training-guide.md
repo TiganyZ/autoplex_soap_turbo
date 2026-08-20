@@ -254,12 +254,51 @@ vasp:
 
 Neither comes out the way FHI-aims reports them, so both are reconstructed.
 
-**The dipole.** `LCALCPOL: true` makes VASP print the electronic and ionic
-dipole moments separately; their sum is the total, already in e·Å. No unit
-conversion — which is worth knowing, because a dipole read in the wrong unit
-fits beautifully and is wrong by a constant factor. Failing that, the
-`LDIPOL`/`IDIPOL` dipole correction prints a `dipolmoment` line, also in e·Å.
-The Berry-phase route wins when both are present.
+**The dipole.** There are three ways to ask VASP for one, and they are not
+interchangeable. All three were run against an isolated LiF monomer — the one
+configuration in this whole workflow whose answer is known independently, since
+its gas-phase dipole is measured at 6.3247 D = 1.3167 e·Å:
+
+| INCAR | monomer \|μ\| (e·Å) | vs experiment | SCF steps |
+|---|---|---|---|
+| `IDIPOL = 4` | 1.2785 | −2.9% | 19 |
+| `IDIPOL = 4`, `LDIPOL = .TRUE.` | 1.2757 | −3.1% | 19 |
+| `LCALCPOL = .TRUE.` | 1.2858 | −2.3% | 19 |
+
+They agree to under 1% of each other, and all sit ~3% below experiment, which is
+the PBE underestimate you should expect. So the choice between them is about
+robustness, and **the default is `IDIPOL = 4` alone**:
+
+- `LDIPOL = .TRUE.` additionally applies a compensating potential across the
+  vacuum. In a cell that is mostly vacuum that sloshes — before the mixing was
+  damped, the monomer's SCF reached 1e-5, jumped several eV and oscillated for
+  30+ steps without ever converging. The training set wants the dipole, not the
+  corrected energy, so the potential term is pure downside.
+- `LCALCPOL` gives a Berry-phase polarization, which is defined only **modulo a
+  lattice vector**. VASP reports `p[ion]` from positions wrapped into the cell,
+  so `p[elc] + p[ion]` comes back a long way from the answer: for this monomer
+  it reads (−60, −60, −46.29) e·Å, where the dipole is (0, 0, −1.29). The parser
+  folds it back, but folding is unambiguous only while the true dipole is under
+  half a cell vector, and a large cluster in a tight box can alias with nothing
+  to show for it.
+
+Both are in e·Å already, so there is no unit conversion — worth knowing, because
+a dipole read in the wrong unit fits beautifully and is wrong by a constant
+factor.
+
+**There is a sign convention, and VASP does not use the physical one.** The
+`dipolmoment` line is reported in "electrons × Angstroem": it measures where the
+electrons sit, so it points from the anion towards the cation, opposite to
+μ = Σᵢ qᵢ rᵢ. The parser negates it. You can check the direction yourself on any
+ionic configuration without trusting either code: in the monomer, Li⁺ sits at
+z = 6.718 and F⁻ at z = 8.282, so μ_z = (+1)(6.718) + (−1)(8.282) = −1.564 e·Å
+at full ionicity — negative. A model trained on the unnegated value fits just as
+well and predicts every dipole backwards.
+
+The **damped mixing** the defaults set — `AMIX 0.1`, `BMIX 0.01`, `AMIN 0.01`,
+`ALGO Normal` — is there for the same reason as the `LDIPOL` note. An isolated
+cluster in a 20 Å cell is ~99% vacuum and VASP's defaults are not written for
+that.
 
 **The polarizability.** VASP has no molecular polarizability. `LEPSILON: true`
 gives the dielectric tensor of the *cell*, and for one isolated object in a
@@ -271,10 +310,32 @@ alpha_ij  =  V / (4 pi) * (eps_ij - delta_ij)          V = cell volume
 
 That is an approximation, and it improves with vacuum. `min_vacuum` is the
 separation between periodic images below which the conversion is **refused**
-rather than performed — because the error runs one way: too small a box gives a
-polarizability that is too small, consistently, so it looks converged.
-`strict_vacuum: false` downgrades the refusal to a warning if you have checked
-convergence yourself.
+rather than performed, because the error is systematic rather than noisy — it is
+a smooth function of density, so an under-converged α looks exactly like a
+converged one. `strict_vacuum: false` downgrades the refusal to a warning if you
+have checked convergence yourself.
+
+Which direction does it err in? Measure it, do not assume — I assumed, and got
+it backwards. `workflows/lif/validation/box_convergence.py` runs the monomer in
+a series of boxes:
+
+| box (Å) | image separation | α_iso (Å³) | vs largest |
+|---|---|---|---|
+| 10 | 8.44 | 1.819 | +0.4% |
+| 12 | 10.44 | 1.813 | +0.1% |
+| 15 | 13.44 | 1.811 | 0.0% |
+| 18 | 16.44 | 1.811 | 0.0% |
+
+Too small a box gives α slightly **too large**, not too small. Periodic images
+of a polarizable object polarize each other, and for a cubic array
+Clausius-Mossotti gives ε − 1 = 4πnα / (1 − 4πnα/3) — so inverting with the bare
+dilute formula overshoots. That relation predicts +0.8%, +0.4%, +0.2%, +0.1% for
+these four boxes, which tracks the measurement.
+
+The effect is small for a molecule this small, and `min_vacuum: 8.0` is
+comfortably conservative for it. It scales with α/V though, so a large
+polarizable cluster in a tight box drifts further — which is what the guard is
+actually for.
 
 ### Sampling: grand-canonical Monte Carlo
 
@@ -287,10 +348,13 @@ sampling:
   method: gcmc
   mc_species: [LiF]
   mc_molecule_files: [data/lif_unit.xyz]
-  mc_mu: [-8.5]
+  mc_mu: [-7.0]          # calibrated -- see below, the obvious guess is wrong
   mc_mu_reference: e0
   mc_types: [move, insertion, removal]
   mc_acceptance: [2, 1, 1]
+  mc:
+    mc_min_dist: 1.2     # not on top of an existing atom
+    mc_max_dist: 3.5     # and not out in the vacuum either
 ```
 
 **Exchange whole neutral units, not individual ions.** This is the single most
@@ -301,14 +365,53 @@ an xyz holding the unit, and turboGAP inserts it at a random orientation and
 removes all its atoms together — so `mc_mu` is the chemical potential *of the
 unit*, and every configuration is neutral by construction.
 
-**`mc_mu` must be calibrated.** −8.5 eV is roughly the formation energy of bulk
-LiF per formula unit, which puts the walk near coexistence. A μ far from the
-interesting range gives a walk that runs and accepts nothing. The sampler warns
-when every configuration came back the same size, which is what that looks like.
+**Bound the insertions, or they land in vacuum.** `mc_min_dist` and
+`mc_max_dist` are how far an inserted unit may be from the nearest existing
+atom. The minimum is the obvious one — 1.2 Å here, below the 1.564 Å Li–F bond
+so an insertion can still land in a bonding position but not on top of an atom.
+The **maximum** is the one that decides whether the walk works at all. Without
+it the trial position is uniform in the cell, and for a 3 Å cluster in a 20 Å
+box that is vacuum essentially every time: the trial is an unbound LiF unit
+floating on its own, and it is rejected every time. 3.5 Å keeps trials on the
+cluster.
+
+**`mc_mu` must be calibrated, and the obvious first guess is wrong.** The
+temptation is to use the bulk formation energy per formula unit — for LiF,
+−8.58 eV. Measured on a real run seeded with an (LiF)₅ cluster, that walk ran to
+completion and accepted **one insertion in 124 attempts**. Nothing reported a
+problem. The candidates were simply all the size of the seed, and what looked
+like grand-canonical sampling was rattling.
+
+μ is weighed against the **insertion** energy, not the bulk cohesive energy, and
+for this cluster that is about −6.2 eV. `workflows/lif/validation/gcmc_report.py`
+prints the comparison directly:
+
+```
+=== mu_m7p00   mu = -7.0
+  moves attempted/accepted:
+    insertion  101/144  (70.1%)
+    move       170/311  (54.7%)
+    removal      5/144  ( 3.5%)
+  insertion dE:  mean -6.40  min -8.51  max +1.54 eV
+  dE - mu:       mean +0.60 eV, 63/144 trials favourable
+  sizes: {10: 1, 14: 1, 16: 1, ... 202: 2}
+```
+
+The opposite failure is just as easy. At μ = −7.0 the walk exchanges freely —
+and grows the seed from 10 atoms to 202 over 600 steps. Removal is almost never
+accepted, because pulling a LiF unit out of a condensed cluster costs far more
+than adding one to its surface, so a condensing system's walk is **growth-biased
+by construction**. Size range is therefore set by run length, not by μ alone,
+and you select the sizes you want out of the trajectory afterwards.
+
+Always run `gcmc_report.py` on a walk before you spend DFT on its output. It
+prints the size distribution and warns when every configuration came back the
+same size.
 
 `mc_mu_reference: e0` measures μ against the isolated-species reference
 energies, so those need to be right — which is one reason the RSS config runs
-isolated atoms.
+isolated atoms. Note that if the driving potential was fitted with `e0 = 0`, as
+the LiF one was, μ is effectively an absolute energy.
 
 ---
 
@@ -339,6 +442,115 @@ Job names in `jf job list` are `<name>: <stage> <iteration>`, so
 
 **The last iteration only fits.** Sampling after the final fit would produce
 data nothing is trained on, so `iterations: 3` runs two rounds of new data.
+
+Each stage names its own worker, so one submitted flow spreads across machines:
+the walk and the DFT on the cluster with the nodes, `gap_fit` on the cluster
+with the QUIP build that supports dipoles. Nothing crosses as a filesystem path
+— the dataset and the potential travel through the job store, because those
+machines share no filesystem.
+
+### Stopping when the model is good enough
+
+`iterations: 3` runs three fits whatever happens. That is the right shape when
+you know how much data you want and are going to look at the result yourself.
+It is the wrong shape when the question is *"is the model good enough yet?"*,
+because nothing in the run ever asks it.
+
+Turning on the `validation` section replaces the fixed count with a
+measurement:
+
+```yaml
+validation:
+  enabled: true
+  source: generate      # its own turboGAP walk and its own DFT batch
+  n_select: 20
+  seed_offset: 1000     # a different random stream from the training sampler
+  tolerance: 0.03       # e·Å per dipole component
+  max_iterations: 10    # the budget for this generation protocol
+  min_iterations: 2
+```
+
+The flow then becomes:
+
+```
+prepare dataset
+  │
+  ├─ validation sample ─▶ validation select ─▶ VASP ─▶ validation set
+  │       (turboGAP, once, before anything is fitted)          │
+  │                                                            │
+  └────────────────────────▶ fit 0 ──▶ validate 0 ──▶ check 0 ─┘
+                                                          │
+                          ┌───────────── below tolerance ──┤
+                          │                                │
+                       summary                    sample 0 ─▶ select 0
+                                                          ─▶ VASP 0
+                                                          ─▶ merge 0
+                                                          ─▶ fit 1 ─▶ ...
+```
+
+**Why a separate test set.** `dataset.train_fraction` already holds frames back,
+but those came out of the same walk and the same DFT batch as the training
+frames. Scoring on them asks whether the model interpolates within the data the
+loop generated for itself — and a loop that stops on that answer stops when it
+has learned its own sampler. The `validation` set is a *different* walk, its own
+DFT batch, computed once before the first fit and never merged into the training
+set. Every iteration is scored on identical frames, and no iteration influenced
+any of them.
+
+**`source: generate` needs Mode B.** The walk needs an energy model, and the
+only model that exists before the first fit is a frozen one. In Mode A the
+potential is fitted by the run itself, so a generated test set would be judged
+by the model it came from — not a fixed benchmark. The settings layer refuses
+that combination and points you at `source: file`, which reads a set you
+computed separately.
+
+**Both halves of the rule are required.** Without `tolerance` the gate never
+fires and the run quietly uses up its budget; without `max_iterations` a model
+that cannot reach the tolerance never stops. Setting `tolerance` is mandatory
+when `validation.enabled` is true, and `max_iterations` supersedes the top-level
+`iterations` (the run says so in its log).
+
+**What `max_iterations` is for.** It belongs to the *generation protocol*, not to
+the system. GCMC on a small seed grows the cluster by roughly a unit every few
+accepted insertions, so ten iterations of 20 frames covers the size range the
+walk reaches before a frame's DFT cost becomes the limit. A protocol that
+explores faster wants fewer; `rattle` around a fixed structure wants fewer still,
+because it stops producing anything new.
+
+**`min_iterations` guards the seed.** Iteration 0 is fitted to the seed data
+alone. A seed set that happens to resemble the test set can clear the tolerance
+without the model having learned anything the loop exists to teach it, so the
+gate is held shut until at least `min_iterations` fits have happened. When that
+is what stopped a run from ending, it says so:
+
+```
+iteration 0 is within tolerance (0.02411 <= 0.03000 e*Angstrom) but
+validation.min_iterations is 2, so the run continues.
+```
+
+**A missing score is not convergence.** If `validate` produced no RMSE — quip
+failed, the potential has no dipole in it, the test set lost its targets — the
+gate treats it as *not converged* and spends another iteration. The opposite
+default is how an unmeasured run gets reported as a successful one.
+
+**Reaching the budget is a failure, and reads as one.** The summary carries
+`converged: false` and a `stopped_because` that names the number it did not
+reach:
+
+```
+reached validation.max_iterations (10) with a validation RMSE of 0.04812
+against a tolerance of 0.03
+```
+
+**What `jf job list` shows.** Only the first iteration exists at submission —
+how many iterations the run takes is the thing it is measuring, so it cannot be
+built up front. Each `check N` either returns the summary or replaces itself
+with `sample N → select N → VASP N → merge N → fit N+1 → validate N+1 →
+check N+1`. `--dry-run` says as much rather than printing a job count.
+
+Building the sampling and the DFT *inside* the gate, after the score, is
+deliberate: a converged model should not have already paid for a DFT batch
+generating data for an iteration that will not happen.
 
 ### prepare dataset — `lif_dipole: prepare dataset`
 
@@ -410,6 +622,20 @@ fit.
 New frames go into training. **The test set does not grow**, and that is what
 makes the per-iteration errors comparable — see
 [Comparing iterations](#comparing-iterations).
+
+### validate — `lif_dipole: validate 0`
+
+Only in a gated run. Runs `quip` with the iteration's dipole model over the
+independent validation set and reports the component RMSE in e·Å. Pinned to the
+**fitting** worker: it needs the same QUIP build the fit used, and the potential
+is already there.
+
+### check — `lif_dipole: check 0`
+
+Only in a gated run, and the job that makes the loop a loop. It compares the
+`validate` RMSE against `validation.tolerance` and either returns the run
+summary or builds the rest of this iteration plus the next one. It is the only
+stage whose output is a decision rather than data.
 
 ---
 
@@ -600,6 +826,20 @@ Every harvest reports counts, and they should match what you asked for:
 | `test_errors_comparable` | the test set changed size; the iteration errors are not comparable |
 | `n_with_predicted_dipole` | the dipole model was carried but never evaluated |
 
+A gated run adds four more, on the summary itself:
+
+| field | what a wrong value means |
+|---|---|
+| `converged` | `false` means the run used up `max_iterations` without reaching the tolerance — an under-trained model, not a finished one |
+| `stopped_because` | the sentence naming which of the two rules ended the run |
+| `iterations_run` | fewer than `max_iterations` means it stopped early, which is the point |
+| `n_validation_frames` | the size of the fixed benchmark; a small number makes the RMSE noisy and the gate twitchy |
+| `validation` | the per-iteration table of scores on the fixed set — this, not `test_rmse`, is what the loop stopped on |
+
+`test_rmse` and `validation_rmse` are different measurements and will not agree.
+`test_rmse` is the held-out slice of the training data, so it grows harder as
+sampling reaches further; `validation_rmse` is the same frames every time.
+
 ### The failures that report success
 
 These are the ones worth being deliberate about, because nothing else will tell
@@ -624,6 +864,28 @@ submit without naming one and there is nothing to match. jobflow-remote
 **replaces** the worker's resources with a stage's rather than merging them, so
 a stage that sets `resources` without repeating `account` and `partition`
 submits with neither. Repeat both in every stage that sets `resources` at all.
+
+**A VASP array that exits 0 with every calculation OOM-killed.** The default on
+Roihu's `small` partition is 1 GB per core; a DFPT response on a 20 Å box needs
+about 1.2 GB per rank, because `LEPSILON` holds the unoccupied bands alongside
+the occupied ones on a 360³ grid. Left at the default, all 22 tasks of a
+reference batch were killed partway through the response loop — and each one's
+*batch* step still reported `COMPLETED` with exit code `0:0`, because the kill
+landed on the `srun` step underneath. `squeue` empties, the array looks finished,
+and the OUTCARs simply stop mid-run. Set `mem_per_cpu` in the stage's
+`resources`, and check a finished batch with
+
+```bash
+sacct -j <id> --format=JobID,State,ExitCode,MaxRSS | grep '\.0'
+```
+
+which shows the step, not the wrapper. Never the job's exit code.
+
+**A validation set with no targets in it.** A gated run scores every iteration
+against `validation`; if that set came back empty of dipoles, the RMSE is
+undefined, and "no error" reads as "no error". Both `load_test_set` and
+`harvest_test_set` refuse an empty set rather than returning one, and the gate
+treats a missing score as *not* converged.
 
 ### Physical cross-checks
 
