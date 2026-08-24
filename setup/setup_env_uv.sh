@@ -241,6 +241,16 @@ else
     uv pip install "atomate2[strict]==0.0.21" pyfhiaims
 fi
 
+# turboGAP's own quip_xml_to_gap/make_gap_files.py parses the GAP XML with
+# BeautifulSoup. It is not a dependency of anything in this repository, and
+# nothing imports it here -- but every simulated sampling run shells out to that
+# script, and without bs4 the conversion fails with a bare ModuleNotFoundError
+# inside a subprocess. The sampler used to catch that and displace instead, so
+# the symptom was a run that completed, reported its full quota of candidates,
+# and never ran turboGAP at all.
+log "installing the turboGAP GAP-conversion dependency"
+uv pip install beautifulsoup4 lxml
+
 log "installing autoplex_soap_turbo (editable)"
 uv pip install -e "$REPO_ROOT"
 

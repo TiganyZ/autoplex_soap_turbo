@@ -1,0 +1,360 @@
+# A CHO dipole model, trained on ethanol clusters of growing size.
+#
+#     python workflows/ethanol/run.py --dry-run
+#     python workflows/ethanol/run.py
+#
+# Mode B: the energy/force model is frozen. `sampling.energy_potential` names an
+# existing CHO GAP which drives every molecular-dynamics run and is never
+# refitted (`energy_fit.enabled: false`). Only the dipole model iterates. The
+# instruction was to train a dipole model against that potential, not to touch
+# it, and this is what expresses that.
+#
+# The generation protocol is the part that is new here. Rather than sampling one
+# fixed system, it walks a ladder of cluster sizes -- one ethanol molecule, then
+# two, then four, up to twenty -- running MD at each rung and training on what
+# comes out before moving up. The argument for growing rather than jumping
+# straight to twenty:
+#
+#   A dipole model fitted only on monomers has never seen the part of the dipole
+#   that exists between molecules, which in a hydrogen-bonded liquid is most of
+#   what makes the spectrum. Asked about a liquid, it extrapolates.
+#
+#   A model fitted only on large clusters has to learn the monomer's own
+#   response and its environment's effect at once, from the most expensive and
+#   least converged configurations available.
+#
+#   Growing the size puts the intermolecular part in gradually, and each rung is
+#   fitted with the previous rungs already in the training set -- so the model
+#   arriving at twenty molecules already knows what one molecule does.
+#
+# Nothing below is specific to ethanol except `sampling.molecule_file` and the
+# species. Point that at a different xyz, change `species_list` and the energy
+# potential to match, and the same protocol trains any molecular liquid.
+
+name: ethanol_dipole
+project: autoplex
+
+# The order the frozen CHO potential was fitted in: its soap_turbo blocks read
+# `species = H C O` with central_species 1, 2, 3. Getting this order wrong does
+# not fail -- it silently maps each species' descriptor onto the wrong element.
+species_list: [H, C, O]
+
+# Superseded by validation.max_iterations below, which is what actually bounds
+# the run. Kept because an ungated run reads this.
+iterations: 7
+
+dataset:
+  # Geometries only -- no dipoles. FHI-aims has never been run on this system,
+  # so iteration 0 computes the seed itself:
+  # `seed structures` -> `aims seed` -> `prepare dataset`.
+  #
+  # A single ethanol molecule. The ladder builds everything else from it.
+  initial: seed_clusters.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+
+  # What the harvest writes, not what the file holds. FHI-aims reports mu in
+  # atomic units and alpha in bohr^3; autoplex_soap_turbo.aims.parse converts
+  # both on the way out, so by the time anything reads them they are canonical.
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  # Isolated clusters. A total dipole moment is only well defined for a
+  # non-periodic system, and FHI-aims computes these as molecules.
+  periodic: false
+
+  # Deliberately absent: `box`. The LiF run could put every configuration in one
+  # 20 A cell because its clusters were all of a size. Here they span 9 to 180
+  # atoms, so one box would be either too small for the largest or mostly vacuum
+  # for the smallest. The cell is derived per cluster instead, from the
+  # structure's own extent plus `sampling.cluster_padding` -- see
+  # autoplex_soap_turbo.data.clusters.
+
+  train_fraction: 0.8
+  seed: 0
+
+sampling:
+  worker: roihu_cpu_turbogap
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 16
+    time: "04:00:00"
+    # Memory is requested explicitly because Roihu hands out 1 GB per CPU by
+    # default, and turboGAP's demand scales with ranks rather than being
+    # divided among them: every MPI rank loads its own copy of the potential,
+    # which for the CHO GAP is 107 MB on disk with 34 MB and 42 MB sparse
+    # arrays. Adding cores therefore adds demand as fast as it adds allowance.
+    # A 16-rank sampling job was OOM-killed at its 16 GB default.
+    mem_per_cpu: 4G
+
+  method: cluster_ladder
+  molecule_file: ethanol.xyz
+
+  # One rung per iteration, held at 20 once the ladder runs out. 20 ethanol
+  # molecules is 180 atoms, which is the largest cluster the FHI-aims tiers
+  # below are sized for and the value of `selection.max_atoms`.
+  #
+  # Doubling early and stepping late: the interesting change is between one
+  # molecule and a few, where the first solvation shell appears. Beyond about
+  # twelve the interior of the cluster stops changing much and the additional
+  # molecules mostly add surface.
+  cluster_ladder: [1, 2, 4, 8, 12, 16, 20]
+
+  # Liquid ethanol is 0.789 g/cm^3, which is 0.0103 molecules/A^3. Building at
+  # liquid density means the clusters are packed the way the liquid the model
+  # will be used on is packed, rather than being loose gas-phase aggregates
+  # whose dipoles have no hydrogen-bond contribution to learn from.
+  cluster_density: 0.0103
+
+  # Vacuum between the cluster and the cell edge. The frozen potential's
+  # soap_turbo cutoff is 4.0 A, so 8 A on each side puts a periodic image at
+  # 16 A -- four times the cutoff, and far enough that FHI-aims' treatment of
+  # the molecule never sees the boundary either.
+  cluster_padding: 8.0
+
+  # Between atoms of *different* molecules only. Set below a hydrogen bond
+  # (about 1.8 A for the H...O contact in an alcohol) so the hydrogen-bonded
+  # geometries the liquid is made of are allowed to be built, while genuine
+  # overlaps are not.
+  cluster_min_separation: 1.6
+
+  energy_potential: /scratch/project_2017844/potentials/CHO_gap/gap_files/CHO.gap
+  carry_dipole_model: true
+
+  n_candidates: 200
+  discard_initial: 5
+
+  md:
+    # 300 K liquid conditions. Long enough to decorrelate from the packed
+    # starting configuration -- which is random, not equilibrated -- and short
+    # enough that a 180-atom rung fits the four-hour request above.
+    md_nsteps: 4000
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 20
+
+  rattle_stdev: 0.05
+
+selection:
+  method: fps
+  n_select: 20
+
+  # Below ethanol's shortest bond, which is the O-H at 0.97 A. The LiF run used
+  # 1.2 because its shortest contact was the 2.0 A Li-F; the same number here
+  # would discard every frame, since every ethanol molecule contains an O-H.
+  # ABSOLUTE_MIN_SEPARATION (0.5 A) still applies underneath.
+  min_separation: 0.85
+
+  # 20 molecules x 9 atoms. Farthest-point selection prefers the largest cluster
+  # in the pool for the same reason it prefers a collapsed one -- nothing else
+  # looks like it -- and in the LiF campaign that preference walked the flow
+  # into a 92-atom DFPT calculation whose SCF never converged. Here the ladder
+  # already bounds the size, and this is the backstop that says so explicitly.
+  max_atoms: 180
+
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+aims:
+  worker: roihu_cpu_aims
+  exec_config: roihu_aims_config
+
+  # The dispatcher only. It generates the per-structure jobs below and does no
+  # arithmetic itself.
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 1
+    time: "00:15:00"
+    # One core means 1 GB by default, and the dispatcher holds the frames
+    # payload while importing jobflow, pymatgen and ASE. It was OOM-killed at
+    # 75 seconds. It does no arithmetic, so this is headroom rather than
+    # capacity.
+    mem: 8G
+
+  # Sized per structure, because the ladder hands one batch frames spanning
+  # 9 to 180 atoms. Undersize the large ones and they time out; oversize the
+  # small ones and FHI-aims has fewer basis functions than MPI ranks and the
+  # linear algebra fails outright rather than merely wasting cores.
+  #
+  # The walltimes below are measured, not guessed. The first campaign asked for
+  # 20 hours on 384 cores for the 180-atom tier; the jobs took **5 min 10 s to
+  # 5 min 39 s**. That request bought a ten-hour wait at PD (Priority) for work
+  # that runs in under six minutes, because a full node for twenty hours
+  # backfills into nothing. Each tier now asks for roughly ten times its
+  # measured runtime, which is margin enough for a slow SCF while still being
+  # small enough to schedule.
+  #
+  # The rungs these correspond to: 1-2 molecules, 3-5, 6-10, 11-20.
+  resource_tiers:
+    - max_atoms: 18
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 32
+        time: "00:20:00"
+        # 2G, not the 1G Slurm default: the node is 762 GB across 384 cores,
+        # so 1.98 GB/core is its natural ratio and the default is half of it.
+        # A 64-core DFPT job on a 60-atom cluster was OOM-killed at 35 s with
+        # the default. Asking 2G restores the proportional share and keeps
+        # `billing` tracking cores -- 4G would make billing memory-driven and
+        # roughly double the fairshare cost, which is what starves large jobs.
+        mem_per_cpu: 2G
+    - max_atoms: 45
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 64
+        time: "00:30:00"
+        mem_per_cpu: 2G
+    - max_atoms: 90
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 128
+        time: "01:00:00"
+        mem_per_cpu: 2G
+    - max_atoms: 180
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 384
+        time: "01:00:00"
+        mem_per_cpu: 2G
+    - max_atoms: null
+      resources:
+        account: project_2017844
+        partition: medium
+        nodes: 2
+        ntasks_per_node: 384
+        time: "04:00:00"
+        mem_per_cpu: 2G
+
+  # Retries resume from the ELSI restart files rather than starting over, and
+  # each attempt is budgeted against what is left of the allocation so that a
+  # frame which cannot be converged is *reported* as unconverged instead of
+  # being killed together with the job that would have reported it. That is what
+  # stopped the LiF campaign: three attempts inside one six-hour allocation, the
+  # third still running when Slurm ended the job, and jobflow then refused to
+  # run the harvest because a parent was FAILED.
+  max_attempts: 4
+  walltime_margin: 300.0
+
+  molecular: true
+  user_params:
+    species_dir: tight
+    xc: pbe
+    output_level: normal
+    electric_field_response: DFPT
+    output: [dipole, mulliken]
+    compute_forces: true
+
+    # Ethanol is a closed-shell molecule with a large HOMO-LUMO gap, and a
+    # cluster of them still is. That is a much easier SCF than the LiF clusters
+    # that failed, so the aggressive damping that run needed is not carried
+    # over -- it would only make every calculation slower.
+    #
+    # What *is* carried over is the iteration limit. LiF's sc_iter_limit of 2000
+    # meant a non-converging frame burned two and a half hours before admitting
+    # it. 300 is well beyond what a well-behaved cluster needs, and turns a
+    # hopeless frame into a fast failure that the retry logic can act on.
+    sc_iter_limit: 300
+    sc_accuracy_rho: 1.0e-5
+    sc_accuracy_eev: 1.0e-3
+    sc_accuracy_etot: 1.0e-6
+
+    # A 180-atom cluster of a light-element molecule in a tight basis is where
+    # near-linear dependence in the basis starts to appear. Verified working in
+    # the LiF campaign, where the run reported the offending overlap eigenvalue
+    # and carried on.
+    #
+    # Deliberately *not* accompanied by a raised basis_threshold. Raising it to
+    # 1e-4 in the LiF run dropped an overlap eigenvalue of 5.14e-5 that the
+    # default 1e-5 had kept, reduced the basis to 1238 functions, and DFPT then
+    # killed an MPI rank. The default is the right value.
+    override_illconditioning: .true.
+
+    KS_method: parallel
+    distributed_spline_storage: true
+
+  # One unconvergeable cluster out of twenty should not lose the other nineteen.
+  require_all: false
+
+fit:
+  worker: triton_gapfit
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    # Eight, not 48: measured at 20 s wall against 111 s CPU on 48 ranks --
+    # 5.5 core-equivalents, 42 idle -- and a 48-CPU fit waited 2 h 05 m on
+    # Triton's sumo partition while an 8-CPU one started in one second.
+    ntasks: 8
+    cpus_per_task: 1
+    time: "04:00:00"
+  hyperparameters_file: gap_hypers.yaml
+
+  # Pure MPI, no OpenMP: the QUIP build is linux_x86_64_gfortran_openmpi, which
+  # has no OpenMP in it at all.
+  mpi_ranks: 8
+  num_processes: 1
+
+  # The regularization on the dipole target, in e*Angstrom. Ethanol's molecular
+  # dipole is about 1.69 D = 0.35 e*A, so 0.02 is roughly 6% of a monomer's
+  # dipole -- tight enough to be informative, loose enough not to fit noise in
+  # the DFPT numbers. Worth revisiting once the first few iterations report a
+  # test RMSE to compare it against.
+  default_dipole_sigma: 0.02
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  # Zero because the fit is on dipoles, not energies: e0 shifts a total energy
+  # and has nothing to subtract from a dipole.
+  e0:
+    H: 0.0
+    C: 0.0
+    O: 0.0
+
+  gap_file_name: ethanol_dipole.xml
+
+energy_fit:
+  # Mode B. The CHO potential is frozen -- that was the instruction -- so no
+  # energy model is fitted and every `energy fit` job is absent from the flow.
+  enabled: false
+
+validation:
+  enabled: true
+
+  # An independent test set: its own cluster ladder walk with a different seed,
+  # its own FHI-aims batch, computed once before the loop and never trained on.
+  # The train/test split inside `dataset` answers "does it interpolate within
+  # what it was given?", which is not the question a training loop should stop
+  # on.
+  source: generate
+  n_select: 20
+  seed_offset: 1000
+
+  # The test set is built at the *top* of the ladder rather than the bottom.
+  # A model that reproduces monomers and fails on twenty-molecule clusters has
+  # not learned the thing this workflow exists to learn, and a test set of
+  # monomers would report that as success.
+  sampling:
+    cluster_ladder: [20]
+
+  # e*Angstrom, on the same scale as default_dipole_sigma above. About 9% of a
+  # monomer's 0.35 e*A dipole, and much less than that relative to a cluster's.
+  tolerance: 0.03
+
+  max_iterations: 10
+  min_iterations: 3

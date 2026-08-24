@@ -269,3 +269,75 @@ def test_a_frame_with_no_prediction_still_strips_cleanly():
     assert found is False
     assert "predicted_dipole" not in frame.info
     assert "energy" not in frame.info
+
+
+# ------------------------------------------------------- post-move relaxation ---
+#
+# A relaxing walk samples relaxed configurations rather than raw trial ones,
+# which for an ionic cluster is the difference between a training set of
+# plausible geometries and one of near-misses.
+
+
+def test_the_relaxation_list_gets_its_count_first():
+    """The same allocation trap as n_mc_mu, and just as silent.
+
+    turboGAP reads n_mc_relax_after to size the list that follows. Write the
+    list alone and the walk starts, runs to completion, and relaxes nothing.
+    """
+    settings = TurbogapMCSettings(
+        potential_file="LiF.gap",
+        species_list=["Li", "F"],
+        mc_types=["move", "insertion", "removal"],
+        mc_species=["LiF"],
+        mc_mu=[-7.0],
+        mc_relax_after=["insertion", "removal"],
+        keywords={"mc_relax": ".true.", "mc_nrelax": 20},
+    )
+    keywords = settings.merged_keywords()
+    order = list(keywords)
+
+    assert keywords["n_mc_relax_after"] == 2
+    assert keywords["mc_relax_after"] == '"insertion" "removal"'
+    assert order.index("n_mc_relax_after") < order.index("mc_relax_after")
+
+
+def test_relaxing_after_a_move_the_walk_never_makes_is_refused():
+    settings = TurbogapMCSettings(
+        potential_file="LiF.gap",
+        species_list=["Li", "F"],
+        mc_types=["move", "insertion"],
+        mc_species=["LiF"],
+        mc_mu=[-7.0],
+        mc_relax_after=["removal"],
+    )
+    with pytest.raises(ValueError, match="not in mc_types"):
+        settings.merged_keywords()
+
+
+def test_no_relaxation_list_emits_no_count():
+    """Empty means `mc_relax` applies to every accepted move, not none."""
+    settings = TurbogapMCSettings(
+        potential_file="LiF.gap",
+        species_list=["Li", "F"],
+        mc_types=["move"],
+    )
+    keywords = settings.merged_keywords()
+
+    assert "n_mc_relax_after" not in keywords
+    assert "mc_relax_after" not in keywords
+
+
+def test_a_relaxing_walk_is_recognised_as_one():
+    """Because whether the walk minimises decides whether it needs repulsion."""
+    plain = TurbogapMCSettings(potential_file="LiF.xml", species_list=["Li", "F"])
+    relaxing = TurbogapMCSettings(
+        potential_file="LiF.xml", species_list=["Li", "F"],
+        keywords={"mc_relax": ".true."},
+    )
+    assert plain.relaxes() is False
+    assert relaxing.relaxes() is True
+    # turboGAP's logical syntax, and the ones a YAML file plausibly produces.
+    for written in (".true.", "true", "True", "T", 1):
+        assert TurbogapMCSettings(
+            potential_file="p", species_list=["Li"], keywords={"mc_relax": written}
+        ).relaxes() is True

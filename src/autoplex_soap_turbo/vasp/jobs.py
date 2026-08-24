@@ -40,6 +40,9 @@ from autoplex_soap_turbo.vasp.parse import (
 
 logger = logging.getLogger(__name__)
 
+#: Shared with the FHI-aims backend: both size a calculation the same way.
+from autoplex_soap_turbo.aims.jobs import _pin, resources_for  # noqa: E402
+
 #: INCAR settings that make VASP report everything this workflow fits.
 #:
 #: ``LCALCPOL`` gives the Berry-phase dipole and ``LEPSILON`` the dielectric
@@ -127,6 +130,17 @@ class VaspDipoleSettings:
     molecular: bool = True
     min_vacuum: float = DEFAULT_MIN_VACUUM
     strict_vacuum: bool = True
+
+    #: Per-structure resource requests, matched on atom count. See
+    #: :func:`~autoplex_soap_turbo.aims.jobs.resources_for`.
+    resource_tiers: list = field(default_factory=list)
+
+    #: Where the generated calculations run, and what the harvest asks for. See
+    #: :class:`~autoplex_soap_turbo.aims.jobs.AimsDipoleSettings` for why these
+    #: travel in the settings rather than being inherited.
+    worker: str | None = None
+    exec_config: str | None = None
+    batch_resources: dict = field(default_factory=dict)
     name_prefix: str = "vasp dipole"
 
     def as_dict(self) -> dict:
@@ -200,6 +214,25 @@ def make_vasp_dipole_maker(settings=None, name: str = "vasp dipole"):
         incar = dict(incar)
         incar.setdefault("KSPACING", ISOLATED_KSPACING)
 
+    # An isolated cluster is Gamma-only, and custodian notices: it reads
+    # KSPACING out of the INCAR, works out that the mesh is 1x1x1, and swaps in
+    # the Gamma-only binary, which is normally the right call -- real
+    # wavefunctions instead of complex ones, about half the memory and time.
+    #
+    # Not here. vasp_gam refuses LEPSILON outright:
+    #
+    #     The Gamma-only version (vasp_gam) does not support the use of
+    #     LEPSILON = .TRUE.. That is because some linear response routines
+    #     require a complex shift to obtain stable convergence.
+    #
+    # and LEPSILON is what produces the dielectric tensor the polarizability is
+    # derived from -- the reason these calculations exist. So the automatic
+    # switch is turned off whenever the settings ask for a response, and every
+    # such calculation runs on vasp_std despite being Gamma-only.
+    vasp_job_kwargs = {}
+    if incar.get("LEPSILON") or incar.get("LCALCPOL"):
+        vasp_job_kwargs["auto_gamma"] = False
+
     return StaticMaker(
         name=name,
         input_set_generator=StaticSetGenerator(
@@ -208,6 +241,7 @@ def make_vasp_dipole_maker(settings=None, name: str = "vasp dipole"):
             # find one would move the atoms out of the geometry that was chosen.
             user_kpoints_settings=None,
         ),
+        run_vasp_kwargs={"vasp_job_kwargs": vasp_job_kwargs} if vasp_job_kwargs else {},
     )
 
 
@@ -271,6 +305,14 @@ def vasp_dipole_calculations(
     for index, atoms in enumerate(structures):
         maker = make_vasp_dipole_maker(settings, name=f"{settings.name_prefix} {index}")
         calculation = maker.make(_to_pymatgen(atoms))
+        # Sized here, where the structure is, rather than once for the batch:
+        # these frames differ by an order of magnitude in atom count.
+        resources = resources_for(len(atoms), settings.resource_tiers)
+        if resources:
+            logger.info(
+                "%s: %d atoms -> %s", calculation.name, len(atoms), resources
+            )
+            _pin(calculation, settings, resources)
         jobs.append(calculation)
         outputs.append(calculation.output)
 
@@ -286,6 +328,8 @@ def vasp_dipole_calculations(
         min_vacuum=settings.min_vacuum,
         strict_vacuum=settings.strict_vacuum,
     )
+    if settings.resource_tiers:
+        _pin(harvest, settings, settings.batch_resources)
     jobs.append(harvest)
 
     return Response(replace=Flow(jobs, output=harvest.output, name="vasp dipole batch"))

@@ -123,11 +123,36 @@ class WorkerSettings:
 
 @dataclass
 class AimsSettings(WorkerSettings):
-    """The FHI-aims reference calculations."""
+    """The FHI-aims reference calculations.
+
+    ``resource_tiers`` sizes each calculation by the structure it is for, rather
+    than giving a whole batch one request. A grand-canonical walk produces
+    frames spanning an order of magnitude in atom count -- 10 to 200 here -- and
+    a single request cannot suit both ends: a node and a half is wasted on a
+    10-atom cluster, while running that cluster's request on a 200-atom one is
+    slow. Worse than either, FHI-aims distributes its Hamiltonian over the MPI
+    ranks, so a small cluster on a whole node has fewer basis functions than
+    processes and ScaLAPACK fails rather than merely wasting the cores.
+
+    Each tier is ``{"max_atoms": N, "resources": {...}}``, matched in order, the
+    first tier whose ``max_atoms`` the structure does not exceed. One tier must
+    be the catch-all, written with ``max_atoms: null``. When tiers are set, the
+    stage-level ``resources`` are not sent -- the per-structure ones replace
+    them rather than merging.
+    """
 
     user_params: dict = field(default_factory=dict)
     molecular: bool = True
     require_all: bool = False
+    resource_tiers: list[dict] = field(default_factory=list)
+
+    #: How many times one configuration may be re-run before it is given up on.
+    max_attempts: int = 5
+
+    #: Seconds of the allocation reserved for recording the outcome, so that a
+    #: frame which cannot be converged is *reported* as unconverged instead of
+    #: being killed together with the job that would have reported it.
+    walltime_margin: float = 900.0
 
 
 @dataclass
@@ -160,6 +185,9 @@ class VaspSettings(WorkerSettings):
     strict_vacuum
         Refuse a polarizability from a cell that is not dilute, rather than
         warning about it.
+    resource_tiers
+        Per-structure resource requests, matched on atom count. See
+        :class:`AimsSettings` for the shape and the reason.
     """
 
     user_incar_settings: dict = field(default_factory=dict)
@@ -167,6 +195,7 @@ class VaspSettings(WorkerSettings):
     require_all: bool = False
     min_vacuum: float = 5.0
     strict_vacuum: bool = True
+    resource_tiers: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -178,6 +207,18 @@ class FitSettings(WorkerSettings):
     #: workers in place of the path. Not something to set by hand.
     hyperparameters: dict | None = None
     num_processes: int = 48
+
+    #: MPI ranks for gap_fit, each running ``num_processes`` threads.
+    #:
+    #: Only useful with an MPI build -- ``QUIP_ARCH`` in the fit log says which.
+    #: Left unset the fit runs as a single process, which on Triton's 48-core
+    #: node reached about a fifth of it. Measured on one node, same fit, same
+    #: data: 1x48 threads 7 s, 48x1 ranks 6 s, 8 ranks x 6 threads 3 s.
+    #:
+    #: The job's ``resources`` must agree: ``ntasks`` equal to this and
+    #: ``cpus_per_task`` equal to ``num_processes``, or srun will not have the
+    #: tasks to place.
+    mpi_ranks: int | None = None
     default_dipole_sigma: float = 0.01
     default_sigma: list[float] = field(default_factory=lambda: [0.001, 0.1, 0.1, 0.1])
     e0: dict[str, float] | None = None
@@ -293,12 +334,124 @@ class SamplingSettings(WorkerSettings):
     #: Relative probability of each entry in :attr:`mc_types`.
     mc_acceptance: list[float] = field(default_factory=list)
 
+    #: Move types after which the walk relaxes the geometry, by name. Needs
+    #: ``mc_relax: true`` in :attr:`mc`; empty means every accepted move.
+    mc_relax_after: list[str] = field(default_factory=list)
+
+    #: The species turboGAP is told about, when that differs from the species
+    #: being fitted.
+    #:
+    #: Defaults to the run's own ``species_list``, which is right whenever the
+    #: driving potential was fitted for exactly the system being sampled. It is
+    #: not right when a frozen potential covers more elements than the system
+    #: does -- a CHO potential driving water, say. The potential's
+    #: ``soap_turbo`` blocks index into the species list in turboGAP's *input*
+    #: file, so that list has to match the potential; meanwhile the dipole model
+    #: has to be fitted for the elements the data actually contains, because a
+    #: species with no environments in the training set has nothing to fit.
+    #:
+    #: Set this to the potential's species and leave ``species_list`` as the
+    #: system's.
+    species_list: list[str] = field(default_factory=list)
+
+    #: One molecule, as an xyz path, for the ``cluster_ladder`` protocol.
+    #:
+    #: The only system-specific input the protocol needs: the ladder builds its
+    #: clusters from copies of this, so ethanol, water and anything else run
+    #: through the same code with a different file here.
+    molecule_file: str | None = None
+
+    #: Contents of :attr:`molecule_file`, inlined by
+    #: :meth:`TrainingConfig.inline_molecule` when the flow is built. The
+    #: sampling worker shares no filesystem with the runner, so the path this
+    #: was written as means nothing there.
+    molecule_contents: str | None = None
+
+    #: Cluster sizes, in molecules, one per iteration.
+    #:
+    #: Walked in order and then held at the top, so a run with more iterations
+    #: than rungs keeps sampling the largest clusters instead of running off the
+    #: end. Growing the size gradually is the point: a dipole model fitted only
+    #: on monomers has never seen the intermolecular part of a liquid's dipole,
+    #: and one fitted only on large clusters has to learn the monomer and the
+    #: environment at once from the hardest configurations available.
+    cluster_ladder: list[int] = field(default_factory=list)
+
+    #: Molecules per cubic Angstrom used to size the sphere the cluster is
+    #: packed into. Liquid ethanol is about 0.0103; the default builds clusters
+    #: at roughly liquid density, which is the regime the model is used in.
+    cluster_density: float = 0.010
+
+    #: Several densities to sweep, instead of the single :attr:`cluster_density`.
+    #:
+    #: When set, the ladder becomes a grid: the density cycles fastest and the
+    #: cluster size advances only once every density has been sampled at the
+    #: current size. A run therefore needs ``len(cluster_ladder) *
+    #: len(cluster_densities)`` iterations to cover it, and the top rung is held
+    #: after that as usual.
+    #:
+    #: This is the axis a model trained at one density has never seen. It is
+    #: not decorative for an infrared spectrum: the dipole is computed along a
+    #: dynamical trajectory that visits compressed and expanded local
+    #: environments continuously, and a model fitted only at the mean density
+    #: extrapolates on most of them.
+    cluster_densities: list[float] = field(default_factory=list)
+
+    #: Vacuum between the cluster and the cell edge, in Angstrom. Has to exceed
+    #: the descriptor cutoff, or an atom sees a periodic image of its own
+    #: cluster and the configuration is not the isolated one it is labelled as.
+    cluster_padding: float = 8.0
+
+    #: Least distance allowed between atoms of two different molecules.
+    cluster_min_separation: float = 1.6
+
+    #: Contents of each file in :attr:`mc_molecule_files`, keyed by base name.
+    #:
+    #: Filled in by :meth:`TrainingConfig.inline_mc_molecules` when the flow is
+    #: built, for the same reason the hyperparameters are inlined: the sampling
+    #: worker shares no filesystem with the runner, so the path this was written
+    #: as means nothing there.
+    mc_molecule_contents: dict = field(default_factory=dict)
+
     def __post_init__(self):
-        allowed = {"rattle", "turbogap_md", "gcmc"}
+        allowed = {"rattle", "turbogap_md", "gcmc", "cluster_ladder"}
         if self.method not in allowed:
             raise ConfigError(
                 f"sampling.method is {self.method!r}; expected one of {sorted(allowed)}"
             )
+        if self.method == "cluster_ladder":
+            if not self.molecule_file:
+                raise ConfigError(
+                    "sampling.method is 'cluster_ladder' but no "
+                    "sampling.molecule_file was given. The ladder builds its "
+                    "clusters from copies of one molecule, so there is nothing "
+                    "to build without it."
+                )
+            if not self.cluster_ladder:
+                raise ConfigError(
+                    "sampling.method is 'cluster_ladder' but "
+                    "sampling.cluster_ladder is empty. Write the sizes to walk "
+                    "through, in molecules, e.g. [1, 2, 4, 8, 12, 16, 20]."
+                )
+            if any(n < 1 for n in self.cluster_ladder):
+                raise ConfigError(
+                    f"sampling.cluster_ladder contains a size below one: "
+                    f"{self.cluster_ladder}"
+                )
+            if any(d <= 0 for d in self.cluster_densities):
+                raise ConfigError(
+                    f"sampling.cluster_densities must all be positive, got "
+                    f"{self.cluster_densities}"
+                )
+            if list(self.cluster_ladder) != sorted(self.cluster_ladder):
+                # Not fatal in principle, but a ladder that goes down again is
+                # almost always a typo, and the protocol's whole argument is
+                # that the model meets the intermolecular part gradually.
+                raise ConfigError(
+                    f"sampling.cluster_ladder is not increasing: "
+                    f"{self.cluster_ladder}. The rungs are walked in order."
+                )
+
         # Whether an unset energy_potential is acceptable depends on
         # energy_fit.enabled, which this section cannot see. TrainingConfig
         # checks it.
@@ -306,9 +459,37 @@ class SamplingSettings(WorkerSettings):
 
 @dataclass
 class SelectionSettings:
-    """How the candidates are reduced to the ones worth a DFT calculation."""
+    """How the candidates are reduced to the ones worth a DFT calculation.
+
+    ``min_separation`` is a geometry sanity check, applied before the diversity
+    selection: a candidate whose atoms are closer than this is discarded rather
+    than sent to DFT. Farthest-point selection actively *prefers* such a
+    structure -- it is unlike everything else in the training set, which is the
+    whole criterion -- so without this the pathological geometries are the ones
+    most likely to be picked.
+
+    Set it a little below the shortest bond the system really has.
+    :data:`~autoplex_soap_turbo.data.selection.ABSOLUTE_MIN_SEPARATION` applies
+    on top whatever this says.
+    """
 
     method: str = "fps"
+    min_separation: float | None = None
+
+    #: Largest structure that may be sent to DFT, in atoms.
+    #:
+    #: A grand-canonical walk grows without an upper bound, and the cost of the
+    #: reference calculation does not grow with it politely: the DFPT response
+    #: is the expensive part, and it is what a dipole model is fitted to. The
+    #: first FHI-aims campaign here was stopped by exactly this -- the walk
+    #: reached 92 atoms, the SCF at that size did not converge in two thousand
+    #: iterations, and two attempts at it consumed a six-hour allocation.
+    #:
+    #: Refusing the frame is better than sizing an allocation for it, because a
+    #: cluster the sampler reached late in a walk is not one the model needs to
+    #: be right about first. ``None`` means no cap.
+    max_atoms: int | None = None
+
     n_select: int = 20
     r_cut: float = 6.0
     n_bins: int = 40
@@ -483,6 +664,53 @@ class TrainingConfig:
         path = Path(value)
         return path if path.is_absolute() else (self.root / path).resolve()
 
+    @staticmethod
+    def _tier_problems(tiers: list[dict], backend: str) -> list[str]:
+        """Whether the per-structure resource tiers can size every structure."""
+        if not tiers:
+            return []
+
+        problems: list[str] = []
+        seen_catch_all = False
+        for index, tier in enumerate(tiers):
+            where = f"{backend}.resource_tiers[{index}]"
+            if not isinstance(tier, dict):
+                problems.append(f"{where} is not a mapping")
+                continue
+            unknown = set(tier) - {"max_atoms", "resources"}
+            if unknown:
+                problems.append(
+                    f"{where} has unknown key(s) {sorted(unknown)}; a tier is "
+                    "{max_atoms, resources}."
+                )
+            if not tier.get("resources"):
+                problems.append(f"{where} sets no resources")
+            max_atoms = tier.get("max_atoms")
+            if max_atoms is None:
+                seen_catch_all = True
+            elif not isinstance(max_atoms, int) or max_atoms < 1:
+                problems.append(
+                    f"{where}.max_atoms must be a positive integer or null "
+                    f"(the catch-all), got {max_atoms!r}"
+                )
+            elif seen_catch_all:
+                problems.append(
+                    f"{where} comes after a tier with max_atoms: null, which "
+                    "matches everything, so this tier can never be reached. "
+                    "Put the catch-all last."
+                )
+
+        if not seen_catch_all:
+            # Without one, a structure larger than every tier gets no resources
+            # at all and submits with whatever the worker defaults to -- which
+            # is the case that most needs a deliberate request.
+            problems.append(
+                f"{backend}.resource_tiers has no catch-all tier. Add one with "
+                "max_atoms: null, last, so a structure larger than every other "
+                "tier still gets a deliberate request."
+            )
+        return problems
+
     def _validation_problems(self) -> list[str]:
         """Whether the convergence gate has everything it needs to fire.
 
@@ -591,6 +819,10 @@ class TrainingConfig:
 
         if self.validation.enabled:
             problems.extend(self._validation_problems())
+
+        reference = self.reference_settings()
+        tiers = getattr(reference, "resource_tiers", None) or []
+        problems.extend(self._tier_problems(tiers, self.reference_backend()))
 
         if self.sampling.method == "gcmc":
             exchanges = not self.sampling.mc_types or bool(
@@ -714,6 +946,52 @@ class TrainingConfig:
             if energy_file == self.fit.hyperparameters_file
             else _read_yaml(self.resolve(energy_file))
         )
+
+    def inline_mc_molecules(self) -> None:
+        """Read the grand-canonical exchange units now and carry their contents.
+
+        Same reason as :meth:`inline_hyperparameters`, and the same trap: a path
+        resolved against ``root`` is a path on the *submitting* machine. turboGAP
+        reads the exchange unit at run time, on the sampling cluster, where that
+        path does not exist -- and the sampler used to catch the resulting
+        FileNotFoundError and displace instead, so the walk simply never
+        happened.
+
+        These are a handful of lines of xyz each.
+        """
+        contents = {}
+        for entry in self.sampling.mc_molecule_files:
+            if entry in ("none", "None", ""):
+                continue
+            path = self.resolve(entry)
+            if not path.is_file():
+                raise ConfigError(
+                    f"sampling.mc_molecule_files names {entry!r}, which does "
+                    f"not exist at {path}. turboGAP reads the exchange unit "
+                    "from this file every time it attempts an insertion."
+                )
+            contents[Path(entry).name] = path.read_text()
+        self.sampling.mc_molecule_contents = contents
+
+    def inline_molecule(self) -> None:
+        """Read the cluster-ladder molecule template and carry its contents.
+
+        Same reason as :meth:`inline_mc_molecules`. The difference in
+        consequence is worth noting: an unreadable exchange unit made the
+        grand-canonical walk silently fall back to displacement, whereas the
+        ladder has nothing to fall back to -- there is no cluster without the
+        template -- so this failing is loud rather than quiet. It is still
+        better caught here, at submission, than an hour into a queue.
+        """
+        if self.sampling.method != "cluster_ladder" or not self.sampling.molecule_file:
+            return
+        path = self.resolve(self.sampling.molecule_file)
+        if not path.is_file():
+            raise ConfigError(
+                f"sampling.molecule_file names {self.sampling.molecule_file!r}, "
+                f"which does not exist at {path}."
+            )
+        self.sampling.molecule_contents = path.read_text()
 
     def energy_hyperparameters_file(self) -> str:
         """Descriptors for the energy model, defaulting to the dipole model's.

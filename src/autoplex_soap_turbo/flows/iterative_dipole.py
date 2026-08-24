@@ -30,7 +30,7 @@ from pathlib import Path
 
 from jobflow import Flow, Response, job
 
-from autoplex_soap_turbo.config import TrainingConfig
+from autoplex_soap_turbo.config import ConfigError, TrainingConfig
 from autoplex_soap_turbo.data.dataset import (
     convert_dataset_units,
     dataset_summary,
@@ -41,7 +41,11 @@ from autoplex_soap_turbo.data.dataset import (
     split_train_test,
     write_dataset,
 )
-from autoplex_soap_turbo.data.selection import select_diverse
+from autoplex_soap_turbo.data.selection import (
+    drop_collapsed,
+    select_diverse,
+    shortest_separation,
+)
 from autoplex_soap_turbo.flows.common import apply_worker, as_atoms, describe_errors
 from autoplex_soap_turbo.payload import (
     files_to_payload,
@@ -57,22 +61,20 @@ logger = logging.getLogger(__name__)
 
 
 @job(data="frames")
-def prepare_dataset(config: dict) -> dict:
-    """Read the seed dataset, put it in the fitting convention, and split it.
+def prepare_seed_structures(config: dict) -> dict:
+    """The seed structures, ready for a reference calculation.
 
-    Runs once at the head of the flow. Everything downstream consumes what this
-    produces, so the unit conversion and the cell check happen exactly once and
-    in one place.
+    Used only when ``dataset.initial`` carries no dipoles: the flow then runs
+    the DFT backend over these before it fits anything. Everything
+    :func:`prepare_dataset` does to a frame *except* the unit conversion and the
+    split, because there is nothing to convert or split yet.
     """
     settings = TrainingConfig(**_rehydrate(config))
     dataset = settings.dataset
 
     frames = read_dataset(settings.resolve(dataset.initial))
-    logger.info("read %d frames from %s", len(frames), dataset.initial)
-
     if dataset.max_initial_frames is not None:
         frames = frames[: dataset.max_initial_frames]
-
     frames = drop_info_keys(frames, dataset.drop_info_keys)
     frames = ensure_cell(
         frames,
@@ -80,21 +82,77 @@ def prepare_dataset(config: dict) -> dict:
         min_vacuum=dataset.min_vacuum,
         periodic=dataset.periodic,
     )
-    frames = convert_dataset_units(
-        frames,
-        dipole_unit=dataset.dipole_unit,
-        polarizability_unit=dataset.polarizability_unit,
-        dipole_key=dataset.dipole_key,
-        polarizability_key=dataset.polarizability_key,
+
+    logger.info(
+        "seed: %d structures from %s, with no dipoles on them -- computing them "
+        "with %s before the first fit",
+        len(frames), dataset.initial, settings.reference_backend(),
     )
+    return {"n_frames": len(frames), "frames": frames_to_payload(frames)}
+
+
+@job(data="frames")
+def prepare_dataset(config: dict, harvested: dict | None = None) -> dict:
+    """Read the seed dataset, put it in the fitting convention, and split it.
+
+    Runs once at the head of the flow. Everything downstream consumes what this
+    produces, so the unit conversion and the cell check happen exactly once and
+    in one place.
+
+    ``harvested`` is the output of a seed reference batch, for the case where
+    ``dataset.initial`` held structures rather than data. The frames then come
+    from that batch instead of from the file, and the file's declared units do
+    not apply -- the reference stage already wrote its results in the canonical
+    ones.
+    """
+    settings = TrainingConfig(**_rehydrate(config))
+    dataset = settings.dataset
+
+    if harvested is not None:
+        frames = as_atoms(harvested.get("frames", []))
+        logger.info("read %d frames from the seed reference batch", len(frames))
+        # Idempotent, and marked as such on the frames: the reference stage
+        # writes e*Angstrom and Angstrom^3, so naming the file's units here
+        # would apply a conversion the data has already had.
+        frames = convert_dataset_units(
+            frames,
+            dipole_key=dataset.dipole_key,
+            polarizability_key=dataset.polarizability_key,
+        )
+    else:
+        frames = read_dataset(settings.resolve(dataset.initial))
+        logger.info("read %d frames from %s", len(frames), dataset.initial)
+
+        if dataset.max_initial_frames is not None:
+            frames = frames[: dataset.max_initial_frames]
+
+        frames = drop_info_keys(frames, dataset.drop_info_keys)
+        frames = ensure_cell(
+            frames,
+            box=dataset.box,
+            min_vacuum=dataset.min_vacuum,
+            periodic=dataset.periodic,
+        )
+        frames = convert_dataset_units(
+            frames,
+            dipole_unit=dataset.dipole_unit,
+            polarizability_unit=dataset.polarizability_unit,
+            dipole_key=dataset.dipole_key,
+            polarizability_key=dataset.polarizability_key,
+        )
 
     with_target = frames_with_target(frames, dataset.dipole_key)
     if not with_target:
         raise ValueError(
             f"none of the {len(frames)} seed frames carries a '{dataset.dipole_key}' "
-            "entry, so there is nothing to fit the first model to. Either supply a "
-            "seed dataset with dipoles, or run the FHI-aims stage on these "
-            "structures first."
+            "entry, so there is nothing to fit the first model to. "
+            + (
+                "The seed reference batch ran but produced no dipoles -- check "
+                "its harvest counts."
+                if harvested is not None
+                else "Either supply a seed dataset with dipoles, or leave them "
+                "off entirely and the flow will compute them first."
+            )
         )
 
     train, test = split_train_test(
@@ -157,6 +215,7 @@ def fit_dipole_model(dataset: dict, config: dict, iteration: int) -> dict:
             extra=fit.extra,
         ),
         num_processes=fit.num_processes,
+        mpi_ranks=fit.mpi_ranks,
         gap_file_name=fit.gap_file_name,
         check_executable=fit.check_executable,
     )
@@ -322,6 +381,54 @@ def fit_energy_model(dataset: dict, config: dict, iteration: int) -> dict:
 # ------------------------------------------------------------------ sampling --
 
 
+def _write_mc_molecules(sampling, workdir: Path) -> list[str]:
+    """Write the exchange units into the run directory, and name them locally.
+
+    The contents travel in the settings (``inline_mc_molecules``); this puts
+    them on disk where the walk will look for them. Absolute paths, because
+    turboGAP resolves them from its own working directory, which is a
+    subdirectory of this one.
+    """
+    contents = sampling.mc_molecule_contents or {}
+    written = []
+    for entry in sampling.mc_molecule_files:
+        if entry in ("none", "None", ""):
+            written.append(entry)
+            continue
+        name = Path(entry).name
+        if name not in contents:
+            raise FileNotFoundError(
+                f"no contents carried for the exchange unit {entry!r}. It "
+                "should have been inlined when the flow was built; a settings "
+                "object built by hand needs inline_mc_molecules() called on it."
+            )
+        target = workdir / name
+        target.write_text(contents[name])
+        written.append(str(target.resolve()))
+    return written
+
+
+def _ladder_molecule(sampling, workdir: Path):
+    """The single molecule the ladder builds its clusters from.
+
+    Read from the contents carried in the settings, not from the configured
+    path: this runs on the sampling cluster, which does not share a filesystem
+    with the machine the settings file was written on.
+    """
+    from ase.io import read as ase_read  # noqa: PLC0415
+
+    if not sampling.molecule_contents:
+        raise FileNotFoundError(
+            f"no contents carried for the molecule template "
+            f"{sampling.molecule_file!r}. It should have been inlined when the "
+            "flow was built; a settings object built by hand needs "
+            "inline_molecule() called on it."
+        )
+    target = workdir / (Path(sampling.molecule_file or "molecule.xyz").name)
+    target.write_text(sampling.molecule_contents)
+    return ase_read(target)
+
+
 @job(data="frames")
 def sample_candidates(
     dataset: dict,
@@ -346,6 +453,10 @@ def sample_candidates(
     dipole from it -- so every written frame carries this iteration's own
     prediction on it.
     """
+    from autoplex_soap_turbo.data.clusters import (  # noqa: PLC0415
+        build_cluster,
+        ladder_step,
+    )
     from autoplex_soap_turbo.turbogap.md import (  # noqa: PLC0415
         TurbogapMDSettings,
         sample_structures,
@@ -365,7 +476,7 @@ def sample_candidates(
     # Both simulated samplers need an energy model: MD integrates its forces and
     # a Monte-Carlo walk accepts against its energy. A dipole model supplies
     # neither, so this resolution is shared.
-    if sampling.method in ("turbogap_md", "gcmc"):
+    if sampling.method in ("turbogap_md", "gcmc", "cluster_ladder"):
         energy_potential = None
         if sampling.energy_potential:
             energy_potential = settings.resolve(sampling.energy_potential)
@@ -396,34 +507,36 @@ def sample_candidates(
             mc_settings = TurbogapMCSettings(
                 potential_file=energy_potential,
                 dipole_potential_file=dipole_potential,
-                species_list=settings.species_list,
+                species_list=sampling.species_list or settings.species_list,
                 keywords=sampling.mc,
                 discard_initial=sampling.discard_initial,
                 timeout=sampling.timeout,
                 mc_species=sampling.mc_species,
                 mc_mu=sampling.mc_mu,
-                # Resolved here, on the submitting machine: the walk reads the
-                # exchange unit from this file at run time, and a path relative
-                # to the settings file means nothing on the sampling cluster.
-                mc_molecule_files=[
-                    entry if entry in ("none", "None", "")
-                    else str(settings.resolve(entry))
-                    for entry in sampling.mc_molecule_files
-                ],
+                # Written into the run directory here, on the machine the walk
+                # runs on, from contents carried in the settings.
+                #
+                # Resolving the path instead -- which is what this did -- gives
+                # an absolute path on the *submitting* machine. turboGAP reads
+                # the exchange unit at run time on the sampling cluster, which
+                # shares no filesystem with the runner, so the file is simply
+                # not there.
+                mc_molecule_files=_write_mc_molecules(sampling, workdir),
                 mc_mu_reference=sampling.mc_mu_reference,
                 mc_types=list(sampling.mc_types or DEFAULT_MC_TYPES),
                 mc_acceptance=sampling.mc_acceptance,
+                mc_relax_after=sampling.mc_relax_after,
             )
         else:
             md_settings = TurbogapMDSettings(
                 potential_file=energy_potential,
                 dipole_potential_file=dipole_potential,
-                species_list=settings.species_list,
+                species_list=sampling.species_list or settings.species_list,
                 keywords=sampling.md,
                 discard_initial=sampling.discard_initial,
                 timeout=sampling.timeout,
             )
-    elif sampling.method in ("turbogap_md", "gcmc"):
+    elif sampling.method in ("turbogap_md", "gcmc", "cluster_ladder"):
         logger.warning(
             "iteration %d: %s was asked for but there is no energy potential to "
             "drive it (%s); displacing instead",
@@ -431,6 +544,36 @@ def sample_candidates(
             sampling.method,
             (energy_fit_result or {}).get("reason", "no energy model was fitted"),
         )
+
+    # The ladder differs from plain MD in one thing only: what the trajectory
+    # starts from. Rather than a frame drawn from the training set -- which is
+    # whatever size the previous rungs happened to produce -- it starts from a
+    # cluster built to this iteration's size. Everything after that is the same
+    # MD, so the ladder is a choice of starting structure, not a new sampler.
+    n_molecules = None
+    density = None
+    if sampling.method == "cluster_ladder":
+        n_molecules, density = ladder_step(
+            sampling.cluster_ladder,
+            iteration,
+            densities=sampling.cluster_densities,
+            density=sampling.cluster_density,
+        )
+        molecule = _ladder_molecule(sampling, workdir)
+        start = build_cluster(
+            molecule,
+            n_molecules,
+            rng=settings.dataset.seed + iteration,
+            number_density=density,
+            min_separation=sampling.cluster_min_separation,
+            padding=sampling.cluster_padding,
+        )
+        logger.info(
+            "iteration %d: cluster ladder rung %d molecules (%d atoms) at "
+            "%.4f molecules/A^3 in a %.1f A cell", iteration, n_molecules,
+            len(start), density, start.get_cell()[0, 0],
+        )
+        existing = [start]
 
     candidates, method = sample_structures(
         existing,
@@ -441,16 +584,36 @@ def sample_candidates(
         rattle_stdev=sampling.rattle_stdev,
         seed=settings.dataset.seed + iteration,
         non_periodic=not settings.dataset.periodic,
+        # A resolved potential that then fails to drive the sampler is a
+        # configuration error, not a missing model. Falling back there gives a
+        # run that completes, reports its full quota of candidates every
+        # iteration, and trains on rattled copies of its own seed.
+        require_simulation=energy_potential_source is not None,
     )
 
     for frame in candidates:
         frame.info["iteration"] = iteration
+        if density is not None:
+            frame.info["cluster_density"] = density
+        if n_molecules is not None:
+            # Stamped here rather than relied on from the starting structure:
+            # the frames come back out of turboGAP's trajectory, which carries
+            # only what turboGAP wrote. Without this the rung a frame belongs to
+            # would have to be guessed from its atom count.
+            frame.info["n_molecules"] = n_molecules
 
     logger.info("iteration %d: %d candidates from %s", iteration, len(candidates), method)
     return {
         "iteration": iteration,
         "method": method,
         "requested_method": sampling.method,
+        # Which rung of the ladder this iteration sampled. Reported rather than
+        # inferred from the frames: a run whose rungs are not advancing is a
+        # protocol that has stalled, and the atom counts alone would not say so.
+        "n_molecules": n_molecules,
+        # Reported alongside the rung, because with a density sweep the rung
+        # alone no longer identifies what was sampled.
+        "cluster_density": density,
         "n_candidates": len(candidates),
         # Which model this round of sampling belongs to, so a candidate set can
         # be traced back to the fit that motivated it.
@@ -480,6 +643,43 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
     frames = dataset["frames"] if "frames" in dataset else dataset
     existing = as_atoms(frames["train"])
 
+    # Before diversity, sanity. Farthest-point selection actively prefers a
+    # collapsed structure -- it is unlike everything already known, which is
+    # exactly the criterion -- so the geometries no DFT code can handle are the
+    # ones most likely to be chosen.
+    n_pool = len(pool)
+    pool, rejected = drop_collapsed(pool, selection.min_separation)
+    if not pool:
+        raise ValueError(
+            f"all {n_pool} candidates were discarded as collapsed (shortest "
+            f"separation {min(rejected):.3f} A). The sampler has lost its "
+            "short-range repulsion -- check whether the converted potential "
+            "kept its core_pot descriptors."
+        )
+
+    # Then affordability. Farthest-point selection prefers the largest cluster
+    # in the pool for the same reason it prefers a collapsed one: nothing else
+    # looks like it. That preference is what walked the last campaign into a
+    # 92-atom DFPT calculation whose SCF never converged.
+    n_oversized = 0
+    if selection.max_atoms is not None:
+        affordable = [a for a in pool if len(a) <= selection.max_atoms]
+        n_oversized = len(pool) - len(affordable)
+        if not affordable:
+            raise ValueError(
+                f"every one of the {len(pool)} candidates exceeds "
+                f"selection.max_atoms = {selection.max_atoms} (smallest is "
+                f"{min(len(a) for a in pool)} atoms). Either the cap is too low "
+                "or the sampler has walked away from the size range being trained."
+            )
+        if n_oversized:
+            logger.info(
+                "iteration %d: %d of %d candidates are larger than %d atoms and "
+                "were not considered", iteration, n_oversized, len(pool),
+                selection.max_atoms,
+            )
+        pool = affordable
+
     chosen = select_diverse(
         pool,
         n_select=selection.n_select,
@@ -498,6 +698,16 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
         "iteration": iteration,
         "n_selected": len(chosen),
         "n_candidates": len(pool),
+        # Reported, not just logged: a batch that lost most of its candidates to
+        # this is a sampler problem, and the count is the only place it shows.
+        "n_collapsed": len(rejected),
+        # Also reported: a batch losing most of its candidates to the size cap
+        # means the walk has left the range the model is being trained on, and
+        # the iteration is spending its budget on the tail of that walk.
+        "n_oversized": n_oversized,
+        "shortest_separation": (
+            round(min(shortest_separation(a) for a in chosen), 4) if chosen else None
+        ),
         "frames": frames_to_payload(chosen),
     }
 
@@ -673,13 +883,17 @@ def evaluate_on_test_set(
 ) -> dict:
     """Score one iteration's dipole model on the independent set.
 
-    Runs on the fitting worker: it needs the same ``quip`` build the fit used,
-    and the potential is already there as a payload.
+    Evaluated with **turboGAP** when a frozen energy potential is available,
+    because turboGAP is what will actually run the model. quip reads the QUIP
+    XML; turboGAP runs a converted ``.gap``, and the conversion is lossy in ways
+    nothing announces. Scoring with the engine that will be used means the
+    number the convergence gate stops on is the number production produces.
+
+    Falls back to quip when there is no energy potential to carry the dipole
+    model -- Mode A before the first energy fit -- since turboGAP loads exactly
+    one potential and the dipole model has to ride inside it.
     """
-    from autoplex_soap_turbo.fitting.dipole_gap import (  # noqa: PLC0415
-        dipole_errors,
-        run_quip_dipole,
-    )
+    from autoplex_soap_turbo.fitting.dipole_gap import dipole_errors  # noqa: PLC0415
 
     settings = TrainingConfig(**_rehydrate(config))
     reference = as_atoms(test_set["frames"])
@@ -691,18 +905,61 @@ def evaluate_on_test_set(
     payload_to_files(fit_result["potential"], potential_dir)
     gap_file = potential_dir / main_file(fit_result["potential"], ".xml")
 
-    dataset_file = write_dataset(workdir / "validation.extxyz", reference)
-    predicted = run_quip_dipole(
-        dataset_file, gap_file, workdir / "validation_predicted.extxyz", workdir=workdir
+    energy_potential = (
+        settings.resolve(settings.sampling.energy_potential)
+        if settings.sampling.energy_potential
+        else None
     )
+
+    if energy_potential is not None:
+        from autoplex_soap_turbo.turbogap.predict import (  # noqa: PLC0415
+            TurbogapPredictSettings,
+            predict_dipoles,
+        )
+
+        predicted = predict_dipoles(
+            reference,
+            TurbogapPredictSettings(
+                potential_file=energy_potential,
+                dipole_potential_file=gap_file,
+                species_list=settings.sampling.species_list or settings.species_list,
+                non_periodic=not settings.dataset.periodic,
+                timeout=settings.sampling.timeout,
+            ),
+            workdir / "predict",
+        )
+        engine = "turbogap"
+    else:
+        from autoplex_soap_turbo.fitting.dipole_gap import run_quip_dipole  # noqa: PLC0415
+
+        logger.info(
+            "no sampling.energy_potential, so the dipole model has no potential "
+            "to ride in; scoring with quip instead of turboGAP"
+        )
+        dataset_file = write_dataset(workdir / "validation.extxyz", reference)
+        predicted = run_quip_dipole(
+            dataset_file, gap_file, workdir / "validation_predicted.extxyz",
+            workdir=workdir,
+        )
+        engine = "quip"
+
     errors = dipole_errors(
         reference, predicted, reference_key=settings.dataset.dipole_key
     )
 
     logger.info(
-        "iteration %d: validation %s", iteration, describe_errors(errors)
+        "iteration %d: validation %s (via %s)",
+        iteration, describe_errors(errors), engine,
     )
-    return {"iteration": iteration, "errors": errors, "n_frames": len(reference)}
+    return {
+        "iteration": iteration,
+        "errors": errors,
+        "n_frames": len(reference),
+        # Which engine produced the number, because the two are not
+        # interchangeable and a run that quietly changed engine mid-campaign
+        # would show as a step in the convergence curve.
+        "engine": engine,
+    }
 
 
 def _fit_digest(result: dict | None, energy: bool = False) -> dict | None:
@@ -1079,11 +1336,11 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
     # carry their contents in the settings. Every stage after this one runs
     # somewhere else, where the path they were named by does not exist.
     settings.inline_hyperparameters()
+    settings.inline_mc_molecules()
+    settings.inline_molecule()
     config = settings.as_dict()
 
-    prepare = prepare_dataset(config)
-    prepare.name = f"{settings.name}: prepare dataset"
-    jobs: list = [prepare]
+    jobs, prepare = _dataset_stage(settings, config)
 
     if settings.validation.enabled:
         return _gated_training(prepare, jobs, settings, config)
@@ -1148,6 +1405,96 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
     return Flow(jobs, output=summary.output, name=settings.name)
 
 
+def _dataset_stage(settings: TrainingConfig, config: dict):
+    """The head of the flow. Returns ``(jobs, prepare_job)``.
+
+    A seed file that already carries dipoles goes straight into
+    :func:`prepare_dataset`. One that carries only structures gets a reference
+    batch first, so a run can start from geometries alone -- which is the normal
+    situation when the reference code is one you have not run on this system
+    before, and the alternative is a separate DFT campaign by hand just to have
+    something for iteration 0 to fit.
+
+    Decided here, on the submitting machine, by reading the file: the flow shape
+    is then fixed before anything is submitted, rather than being a branch some
+    job takes at run time.
+    """
+    frames = read_dataset(settings.resolve(settings.dataset.initial))
+    _refuse_open_shell_seed(frames, settings)
+
+    if _carries_targets(frames, settings.dataset.dipole_key):
+        prepare = prepare_dataset(config)
+        prepare.name = f"{settings.name}: prepare dataset"
+        return [prepare], prepare
+
+    seed = prepare_seed_structures(config)
+    seed.name = f"{settings.name}: seed structures"
+
+    reference = _reference_stage(seed.output, settings, SEED_PASS)
+
+    prepare = prepare_dataset(config, harvested=reference.output)
+    prepare.name = f"{settings.name}: prepare dataset"
+    return [seed, reference, prepare], prepare
+
+
+def _carries_targets(frames, key: str) -> bool:
+    """Whether these frames already hold the quantity being fitted.
+
+    Asks the frames directly rather than through ``frames_with_target``, which
+    warns about what it drops -- correct inside a job, but here a seed of bare
+    structures is the expected case, and "dropped 22 frames" at submission time
+    reads as a problem rather than as the answer to the question.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    return any(
+        key in frame.info and np.asarray(frame.info[key]).size for frame in frames
+    )
+
+
+def _refuse_open_shell_seed(frames, settings: TrainingConfig) -> None:
+    """Refuse a molecular FHI-aims run over frames with unpaired electrons.
+
+    Checked here, on the submitting machine, because the alternative is finding
+    out from a worker: pymatgen builds every Molecule at charge 0 and
+    multiplicity 1, and an odd electron count comes back as a bare "Charge of 0
+    and spin multiplicity of 1 is not possible for this molecule" after the job
+    has queued, been staged and started.
+
+    Only FHI-aims in molecular mode. VASP does not refuse these -- it fills the
+    half-occupied level with a fractional occupation and finishes -- which is
+    worse, not better: the number it reports is not the ground state and nothing
+    says so.
+    """
+    if settings.reference_backend() != "aims" or not settings.aims.molecular:
+        return
+
+    from autoplex_soap_turbo.aims.jobs import open_shell_frames  # noqa: PLC0415
+
+    open_shell = open_shell_frames(frames)
+    if not open_shell:
+        return
+
+    formulas = ", ".join(
+        f"{index}: {frames[index].get_chemical_formula()}"
+        for index in open_shell[:6]
+    )
+    more = "" if len(open_shell) <= 6 else f" (and {len(open_shell) - 6} more)"
+    raise ConfigError(
+        f"{len(open_shell)} of {len(frames)} frames in "
+        f"{settings.dataset.initial} have an odd number of electrons, so they "
+        f"are open-shell radicals -- {formulas}{more}. FHI-aims is asked to "
+        "compute these as closed-shell molecules and cannot.\n\n"
+        "For an ionic system this is the same thing as being "
+        "non-stoichiometric, and a grand-canonical walk that exchanges whole "
+        "neutral units never produces one -- so these frames are a different "
+        "physical regime from everything the model will be asked about. "
+        "Dropping them is usually right. Keeping them means 'spin: collinear' "
+        "in aims.user_params, a default_initial_moment, and a response "
+        "calculation that is no longer the same one."
+    )
+
+
 def _gated_training(prepare, jobs: list, settings: TrainingConfig, config: dict) -> Flow:
     """The convergence-gated shape of the run.
 
@@ -1206,8 +1553,15 @@ def _iteration_flow(
 
     evaluate = evaluate_on_test_set(fit.output, test_set, config, iteration)
     evaluate.name = f"{settings.name}: validate {iteration}"
-    # quip, and the potential, are both on the fitting worker.
-    apply_worker(evaluate, settings.fit)
+    # The sampling worker, not the fitting one: this runs turboGAP, and
+    # turboGAP is on the machine that does the sampling. The potential travels
+    # as a payload, so neither machine needs the other's filesystem. Without a
+    # frozen energy potential it falls back to quip, which needs the fitting
+    # worker instead.
+    apply_worker(
+        evaluate,
+        settings.sampling if settings.sampling.energy_potential else settings.fit,
+    )
     jobs.append(evaluate)
 
     gate = convergence_gate(
@@ -1281,16 +1635,18 @@ def _test_set_stage(dataset_ref, settings: TrainingConfig, config: dict):
 
     validation_config = _validation_sampling_config(settings, config)
 
-    # `-1` marks these as the pre-loop pass: it keeps their job names and their
-    # working directories from colliding with iteration 0's.
-    sample = sample_candidates(dataset_ref, {}, validation_config, -1)
+    # A negative iteration marks these as a pre-loop pass: it keeps their job
+    # names and their working directories from colliding with iteration 0's.
+    sample = sample_candidates(dataset_ref, {}, validation_config, VALIDATION_PASS)
     sample.name = f"{settings.name}: validation sample"
     apply_worker(sample, settings.sampling)
 
-    select = select_structures(sample.output, dataset_ref, validation_config, -1)
+    select = select_structures(
+        sample.output, dataset_ref, validation_config, VALIDATION_PASS
+    )
     select.name = f"{settings.name}: validation select"
 
-    reference = _reference_stage(select.output, settings, -1)
+    reference = _reference_stage(select.output, settings, VALIDATION_PASS)
 
     harvest = harvest_test_set(reference.output, config)
     harvest.name = f"{settings.name}: validation set"
@@ -1311,14 +1667,18 @@ def _reference_stage(selected, settings: TrainingConfig, iteration: int):
     return _aims_stage(selected, settings, iteration)
 
 
-def _stage_label(iteration: int) -> str:
-    """How a stage names its iteration.
+#: Iteration numbers for the two passes that happen before the loop starts.
+#: Negative so they cannot collide with a real iteration, and named in the job
+#: list so "-1" does not read as a bug.
+VALIDATION_PASS = -1
+SEED_PASS = -2
 
-    Iteration ``-1`` is the pass that builds the validation set, before the loop
-    starts. Calling it "-1" in `jf job list` would read as a bug rather than as
-    a deliberate marker.
-    """
-    return "validation" if iteration < 0 else str(iteration)
+_PRE_LOOP_LABELS = {VALIDATION_PASS: "validation", SEED_PASS: "seed"}
+
+
+def _stage_label(iteration: int) -> str:
+    """How a stage names its iteration."""
+    return _PRE_LOOP_LABELS.get(iteration, str(iteration))
 
 
 def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
@@ -1334,6 +1694,12 @@ def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
         min_vacuum=settings.vasp.min_vacuum,
         strict_vacuum=settings.vasp.strict_vacuum,
         name_prefix=f"{settings.name} vasp {_stage_label(iteration)}",
+        resource_tiers=settings.vasp.resource_tiers,
+        # The calculations this generates set their own complete manager config,
+        # so they need to be told where to run rather than inheriting it.
+        worker=settings.vasp.worker,
+        exec_config=settings.vasp.exec_config,
+        batch_resources=settings.vasp.resources,
     )
     calculation = vasp_dipole_calculations(
         selected,
@@ -1343,9 +1709,15 @@ def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
         require_all=settings.vasp.require_all,
     )
     calculation.name = f"{settings.name}: vasp {_stage_label(iteration)}"
-    # dynamic=True so the per-structure jobs this replaces itself with inherit
-    # the worker too, rather than falling back to the project default.
-    apply_worker(calculation, settings.vasp)
+    # The worker propagates to the per-structure jobs this replaces itself with,
+    # so they land on the same machine rather than the project default. The
+    # resources do not, when tiers are in play: this job's request is for
+    # building the batch, and each calculation sets its own.
+    apply_worker(
+        calculation,
+        settings.vasp,
+        propagate=not settings.vasp.resource_tiers,
+    )
     return calculation
 
 
@@ -1360,6 +1732,14 @@ def _aims_stage(selected, settings: TrainingConfig, iteration: int):
         user_params=settings.aims.user_params,
         molecular=settings.aims.molecular,
         name_prefix=f"{settings.name} aims {_stage_label(iteration)}",
+        resource_tiers=settings.aims.resource_tiers,
+        max_attempts=settings.aims.max_attempts,
+        walltime_margin=settings.aims.walltime_margin,
+        # The calculations this generates set their own complete manager config,
+        # so they need to be told where to run rather than inheriting it.
+        worker=settings.aims.worker,
+        exec_config=settings.aims.exec_config,
+        batch_resources=settings.aims.resources,
     )
     calculation = aims_dipole_calculations(
         selected,
@@ -1368,7 +1748,13 @@ def _aims_stage(selected, settings: TrainingConfig, iteration: int):
         polarizability_key=settings.dataset.polarizability_key,
     )
     calculation.name = f"{settings.name}: aims {_stage_label(iteration)}"
-    # dynamic=True so the per-structure jobs this replaces itself with inherit
-    # the worker too, rather than falling back to the project default.
-    apply_worker(calculation, settings.aims)
+    # The worker propagates to the per-structure jobs this replaces itself with,
+    # so they land on the same machine rather than the project default. The
+    # resources do not, when tiers are in play: this job's request is for
+    # building the batch, and each calculation sets its own.
+    apply_worker(
+        calculation,
+        settings.aims,
+        propagate=not settings.aims.resource_tiers,
+    )
     return calculation

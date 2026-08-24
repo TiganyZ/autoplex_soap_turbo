@@ -146,6 +146,25 @@ def prepare_md_directory(
             "and corrupt the dynamics"
         )
 
+    if "core_pot" in (built.get("dropped_descriptors") or []) and getattr(
+        settings, "relaxes", lambda: False
+    )():
+        raise RuntimeError(
+            f"{Path(settings.potential_file).name} lost its core_pot descriptors "
+            "during conversion -- their sparse sets are empty, and turboGAP "
+            "cannot read a descriptor with no sparse points -- so the potential "
+            "this walk will use has no short-range repulsive wall.\n\n"
+            "That is survivable for a Metropolis walk, whose trial moves are "
+            "bounded by mc_move_max and rejected on energy. It is not "
+            "survivable for a relaxation: gradient descent has nothing to stop "
+            "it and runs downhill into a spurious minimum. Measured on LiF, "
+            "mc_relax with this potential produced candidates whose shortest "
+            "bond was 0.389 A against an equilibrium Li-F of 1.564, and "
+            "FHI-aims then aborted during basis setup on two thirds of them.\n\n"
+            "Either turn mc_relax off, or supply a potential whose core "
+            "repulsion survives conversion."
+        )
+
     structure = start_structure.copy()
     # turboGAP needs a box even for an isolated molecule; the boundary
     # conditions are what say it is not a crystal.
@@ -221,6 +240,22 @@ _MODEL_INFO_KEYS = (
 #: The same, per atom.
 _MODEL_ARRAY_KEYS = ("forces", "local_energy", "core_electron_be")
 
+#: Per-atom arrays turboGAP writes for its own bookkeeping, which nothing
+#: downstream wants and which QUIP cannot even read back.
+#:
+#: ``fix_atoms`` is the one that bites. turboGAP writes it as three columns of
+#: the strings "T"/"F", one per Cartesian direction, and QUIP's xyz reader
+#: rejects a string property with more than one column outright:
+#:
+#:     libAtoms/xyz.c line 972 kind IO
+#:     String property fix_atoms with ncols != 1 no longer supported
+#:
+#: That is a hard abort in gap_fit, not a warning. It does not appear until the
+#: first fit whose training set contains sampled frames -- iteration 0 fits the
+#: seed data, which was built in Python and never went through turboGAP -- so
+#: it surfaces one whole iteration after the code that caused it.
+_SAMPLER_BOOKKEEPING_ARRAYS = ("fix_atoms", "velocities")
+
 
 def strip_model_outputs(frame: Atoms, method: str, non_periodic: bool) -> bool:
     """Remove everything the sampling models computed, keeping the dipole aside.
@@ -244,7 +279,8 @@ def strip_model_outputs(frame: Atoms, method: str, non_periodic: bool) -> bool:
     frame.calc = None
     for key in (*_MODEL_INFO_KEYS, *_DIPOLE_INFO_KEYS, DIPOLE_KEY):
         frame.info.pop(key, None)
-    for key in (*_MODEL_ARRAY_KEYS, *_DIPOLE_ARRAY_KEYS):
+    for key in (*_MODEL_ARRAY_KEYS, *_DIPOLE_ARRAY_KEYS,
+                *_SAMPLER_BOOKKEEPING_ARRAYS):
         frame.arrays.pop(key, None)
 
     # Re-attached under a name that cannot be mistaken for a reference: it says
@@ -360,6 +396,7 @@ def sample_structures(
     seed: int = 0,
     non_periodic: bool = True,
     mc_settings=None,
+    require_simulation: bool = False,
 ) -> tuple[list[Atoms], str]:
     """Produce new candidate structures, by simulation when possible.
 
@@ -367,11 +404,20 @@ def sample_structures(
     caller can record which iterations were simulation-driven and which were
     not.
 
-    Falls back to displacement -- with a warning, never silently -- when a
-    simulation is asked for but cannot run, because losing a whole iteration to
-    a missing turboGAP binary is worse than sampling less widely for one round.
-    Both simulated methods need an energy model to integrate or to accept
-    against, so the first iteration of a self-contained run always lands here.
+    Two very different situations end up here, and conflating them is expensive.
+
+    *No energy model exists yet.* Both simulated methods need one -- MD
+    integrates its forces, a Monte-Carlo walk accepts against its energy -- so
+    the first iteration of a self-contained run has nothing to sample with.
+    Displacing is the right answer, and losing the round would be worse.
+
+    *An energy model was supplied and does not work.* That is a configuration
+    error, and falling back turns it into a run that completes, reports two
+    hundred candidates per iteration, and quietly trains on rattled copies of
+    its own seed for as long as you let it. ``require_simulation`` makes this
+    raise instead, and the caller sets it whenever a potential was resolved --
+    because at that point the sampler is not missing a model, it is failing to
+    use one.
     """
     if mc_settings is not None and mc_settings.potential_file is not None:
         from autoplex_soap_turbo.turbogap.mc import turbogap_mc_sample  # noqa: PLC0415
@@ -382,7 +428,22 @@ def sample_structures(
             mc_settings.non_periodic = non_periodic
             start = structures[int(np.random.default_rng(seed).integers(len(structures)))]
             return turbogap_mc_sample(start, mc_settings, directory / "mc"), "turbogap_mc"
-        except Exception as exc:  # noqa: BLE001 - fall back rather than lose the round
+        except Exception as exc:
+            if require_simulation:
+                raise RuntimeError(
+                    f"grand-canonical sampling failed with {mc_settings.potential_file} "
+                    f"({exc}). A potential was supplied, so this is a "
+                    "configuration error rather than a missing model, and "
+                    "falling back to displacement would hide it.\n\n"
+                    "sampling.energy_potential accepts either a QUIP *.xml* "
+                    "or an already-converted turboGAP *.gap*. Prefer the .gap "
+                    "when you have one: converting an XML drops the core_pot "
+                    "descriptors, because their sparse sets are empty, and the "
+                    "rebuilt potential then has no short-range repulsion. A "
+                    ".gap must keep its whole gap_files/ directory beside it -- "
+                    "it names its descriptors and its core splines by relative "
+                    "path."
+                ) from exc
             logger.warning(
                 "turboGAP Monte-Carlo sampling failed (%s); falling back to "
                 "displacement", exc,
@@ -406,7 +467,21 @@ def sample_structures(
             # all retrace the same trajectory.
             start = structures[int(np.random.default_rng(seed).integers(len(structures)))]
             return turbogap_md_sample(start, settings, directory / "md"), "turbogap_md"
-        except Exception as exc:  # noqa: BLE001 - fall back rather than lose the round
+        except Exception as exc:
+            if require_simulation:
+                raise RuntimeError(
+                    f"turboGAP MD sampling failed with {md_settings.potential_file} "
+                    f"({exc}). A potential was supplied, so this is a "
+                    "configuration error rather than a missing model.\n\n"
+                    "sampling.energy_potential accepts either a QUIP *.xml* "
+                    "or an already-converted turboGAP *.gap*. Prefer the .gap "
+                    "when you have one: converting an XML drops the core_pot "
+                    "descriptors, because their sparse sets are empty, and the "
+                    "rebuilt potential then has no short-range repulsion. A "
+                    ".gap must keep its whole gap_files/ directory beside it -- "
+                    "it names its descriptors and its core splines by relative "
+                    "path."
+                ) from exc
             logger.warning(
                 "turboGAP MD sampling failed (%s); falling back to displacement", exc
             )

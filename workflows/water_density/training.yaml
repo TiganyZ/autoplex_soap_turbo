@@ -1,0 +1,352 @@
+# Extending the water dipole model over a range of cluster densities.
+#
+#     python workflows/water_density/run.py --dry-run
+#     python workflows/water_density/run.py
+#
+# A second campaign on top of workflows/water_ladder/, not a replacement for it.
+# The first run climbed the size ladder at one density -- liquid water, 0.0334
+# molecules/A^3 -- and reached a validation RMSE of 0.118 e*Angstrom on
+# 20-molecule clusters. This one holds that data and adds the axis it never
+# sampled.
+#
+# Why density is the axis worth adding next. A dipole model fitted at a single
+# density has seen one intermolecular separation distribution. The quantity it
+# will be used for -- an infrared spectrum from the dipole autocorrelation of a
+# dynamical trajectory -- visits compressed and expanded local environments
+# continuously, so at the moment the model is extrapolating on most of the
+# configurations it will be asked about.
+#
+# The ladder becomes a grid: density cycles fastest, and the cluster size
+# advances only once both densities have been sampled at the current size.
+# Advancing the two together would walk the diagonal and leave every
+# off-diagonal combination untested, which is precisely the coverage this run
+# exists to obtain.
+
+name: water_dipole_density
+project: autoplex
+
+# The elements the *data* contains, and therefore the ones the dipole model is
+# fitted for. A species with no environments in the training set has nothing to
+# fit, so carbon must not appear here.
+species_list: [H, O]
+
+iterations: 7
+
+dataset:
+  # 103 converged FHI-aims calculations recovered from the first campaign with
+  # scripts/salvage_aims_data.py --species H O. They already carry `mu` and
+  # `alpha`, so the `seed structures` -> `aims seed` stage is skipped and
+  # iteration 0 fits immediately: this run *extends* the model rather than
+  # rebuilding it.
+  #
+  # From 172 recoverable water directories: 40 were dropped as a different
+  # FHI-aims setting group (the older workflows/water_dipole run, which had no
+  # sc_accuracy_rho set and so is not comparable), and the novelty filter
+  # collapsed the remaining 132 to 103 distinct configurations.
+  #
+  # One caveat worth stating plainly: these include the frames that served as
+  # the *previous* run's validation set. This run generates its own test set
+  # from a different random stream, so its reported numbers are honest, but the
+  # two campaigns' validation sets are not independent of each other and their
+  # RMSEs should not be compared as if they were.
+  initial: data/dipole_dataset.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  periodic: false
+  # No `box`: the cell is derived per cluster from its own extent plus
+  # `sampling.cluster_padding`, because these frames run from 3 to 60 atoms.
+
+  train_fraction: 0.8
+  seed: 0
+
+sampling:
+  worker: roihu_cpu_turbogap
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 8
+    # Small and short. A request this size backfills into gaps in the schedule
+    # instead of waiting for a whole node to come free, which is most of what
+    # makes a run feel quick -- the ethanol workflow's 384-core, 20-hour
+    # requests sat at PD (Priority) for hours before starting.
+    time: "01:00:00"
+    # Memory is requested explicitly because Roihu hands out 1 GB per CPU by
+    # default, and turboGAP's demand scales with ranks rather than being
+    # divided among them: every MPI rank loads its own copy of the potential,
+    # which for the CHO GAP is 107 MB on disk with 34 MB and 42 MB sparse
+    # arrays. Adding cores therefore adds demand as fast as it adds allowance.
+    # A 16-rank sampling job was OOM-killed at its 16 GB default.
+    mem_per_cpu: 4G
+
+  method: cluster_ladder
+  molecule_file: water.xyz
+
+  # The species turboGAP is told about, which is the frozen potential's list,
+  # not the run's. The potential's soap_turbo blocks declare `n_species = 3`
+  # and index into the species list in turboGAP's input file, so that list has
+  # to match the potential or the descriptors map onto the wrong elements.
+  #
+  # Declaring an element that no atom in the system has is harmless -- the water
+  # probe ran exactly this way. Fitting one is not, which is why `species_list`
+  # above stays [H, O].
+  species_list: [H, C, O]
+
+  # Starts at 4, not 1. The inherited dataset already covers 1, 2 and 4
+  # molecules at liquid density, and the first campaign showed rungs below 8
+  # bought almost nothing there (0.387 -> 0.337 across three rungs) because
+  # small clusters are nearly all surface. Five rungs x two densities is ten
+  # iterations to cover the grid, which is what max_iterations is set to.
+  cluster_ladder: [4, 8, 12, 16, 20]
+
+  # The two densities the first campaign did not sample, either side of the
+  # 0.0334 liquid value it did. Written as *requested* densities, which is not
+  # what comes out:
+  #
+  #   requested   extent of a 20-molecule cluster   achieved
+  #     0.017              13.72 A                   ~0.015
+  #     0.0334             10.96 A                   ~0.029
+  #     0.060               9.76 A                   ~0.041
+  #
+  # Packing saturates at the top because rejection sampling cannot place
+  # molecules closer than `cluster_min_separation`, and the sphere radius
+  # carries a molecular-radius offset that dominates at small volumes. So the
+  # usable span is about 0.5x to 1.4x liquid density, not the 0.5x to 1.8x the
+  # numbers suggest. Pushing higher needs a smaller minimum separation, which
+  # would start building configurations water does not visit.
+  cluster_density: 0.0334
+  cluster_densities: [0.017, 0.060]
+
+  cluster_padding: 8.0
+
+  # Below the ~1.8 A H...O hydrogen bond, so the hydrogen-bonded geometries
+  # water is almost entirely made of can be built. This is even more the point
+  # here than for ethanol: a water cluster with no hydrogen bonds is not water.
+  cluster_min_separation: 1.6
+
+  energy_potential: /scratch/project_2017844/potentials/CHO_gap/gap_files/CHO.gap
+
+  # On. The fitted dipole model is concatenated into the same turboGAP file as
+  # the energy model, and the two declare different species lists -- two against
+  # three -- which is safe:
+  #
+  #   turbogap.f90:1450 passes each soap_turbo block its *own* n_species and
+  #   species_types, and gap_interface.f90:202 builds the per-atom species
+  #   indices by matching the raw atom symbols against that block-local list.
+  #   central_species indexes into the same block-local list. So a dipole block
+  #   saying `n_species = 2, species = H O, central_species = 1` means "H, index
+  #   1 of my own list" whatever the input file's global list says. The global
+  #   list only has to cover the atoms actually present -- which is also why
+  #   declaring C for a system with no carbon is harmless.
+  #
+  # This was off in the first submission (ids 1115-1124) because it had not been
+  # checked. It costs a diagnostic when off: the sampled frames do not carry the
+  # model's own prediction, so there is no per-frame signal of where it is
+  # extrapolating.
+  carry_dipole_model: true
+
+  # Fewer than ethanol's 200. The frames are 3 to 60 atoms and highly
+  # correlated within one trajectory, so 100 is plenty to select 12 from.
+  n_candidates: 100
+  discard_initial: 5
+
+  md:
+    # 2000 steps at 0.5 fs is 1 ps -- enough to decorrelate from the packed
+    # starting configuration, which is random rather than equilibrated. Water's
+    # hydrogen-bond network rearranges on a picosecond, so this is about one
+    # network lifetime and not more.
+    md_nsteps: 2000
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 20
+
+  rattle_stdev: 0.05
+
+selection:
+  method: fps
+
+  # 12 rather than ethanol's 20. Each iteration then costs 12 short FHI-aims
+  # jobs instead of 20, and the loop turns over faster; the ladder still puts
+  # 84 configurations in by the time it reaches the top rung.
+  n_select: 12
+
+  # Below water's O-H bond at 0.96 A. Applied to the whole frame, so it has to
+  # clear the shortest *bond*, not the shortest intermolecular contact.
+  min_separation: 0.80
+
+  # 20 molecules x 3 atoms.
+  max_atoms: 60
+
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+aims:
+  worker: roihu_cpu_aims
+  exec_config: roihu_aims_config
+
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 1
+    time: "00:10:00"
+    # One core means 1 GB by default, and the dispatcher holds the frames
+    # payload while importing jobflow, pymatgen and ASE. It was OOM-killed at
+    # 75 seconds. It does no arithmetic, so this is headroom rather than
+    # capacity.
+    mem: 8G
+
+  # Every tier is a fraction of a node for well under two hours. That is the
+  # main reason this workflow finishes quickly: 60 atoms of water is a far
+  # smaller DFPT problem than 180 atoms of ethanol, and small short requests
+  # backfill instead of queueing.
+  #
+  # The rungs: 1-4 molecules, 5-10, 11-20.
+  resource_tiers:
+    - max_atoms: 12
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 16
+        time: "00:30:00"
+        # 2G, not the 1G Slurm default: the node is 762 GB across 384 cores,
+        # so 1.98 GB/core is its natural ratio and the default is half of it.
+        # A 64-core DFPT job on a 60-atom cluster was OOM-killed at 35 s with
+        # the default. Asking 2G restores the proportional share and keeps
+        # `billing` tracking cores -- 4G would make billing memory-driven and
+        # roughly double the fairshare cost, which is what starves large jobs.
+        mem_per_cpu: 2G
+    - max_atoms: 30
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 32
+        time: "01:00:00"
+        mem_per_cpu: 2G
+    - max_atoms: 60
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 64
+        time: "02:00:00"
+        mem_per_cpu: 2G
+    - max_atoms: null
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 128
+        time: "04:00:00"
+        mem_per_cpu: 2G
+
+  # Three attempts, and 300 s held back rather than ethanol's 1800. The margin
+  # only has to cover writing the result and handing it back, and on a 30-minute
+  # allocation half an hour of margin would leave nothing to compute in.
+  #
+  # Note this is the one place where making the jobs short has a real cost:
+  # retries happen *inside* one allocation, so a frame that needs more time than
+  # the tier allows is reported unconverged and dropped rather than resumed in a
+  # fresh job. With `require_all: false` the batch continues without it.
+  max_attempts: 3
+  walltime_margin: 300.0
+
+  molecular: true
+  user_params:
+    species_dir: tight
+    xc: pbe
+    output_level: normal
+    electric_field_response: DFPT
+    output: [dipole, mulliken]
+    compute_forces: true
+
+    # Water clusters are closed-shell with a large gap and converge easily.
+    # 200 is well beyond what one needs and turns a pathological frame into a
+    # fast failure instead of one that eats its whole allocation.
+    sc_iter_limit: 200
+    sc_accuracy_rho: 1.0e-5
+    sc_accuracy_eev: 1.0e-3
+    sc_accuracy_etot: 1.0e-6
+
+    override_illconditioning: .true.
+    KS_method: parallel
+    distributed_spline_storage: true
+
+  require_all: false
+
+fit:
+  worker: triton_gapfit
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    # Eight, not the 48 the other workflows ask for, and this is measured
+    # rather than guessed. gap_fit on 48 ranks came back at 20 s wall against
+    # 111 s of CPU -- 5.5 core-equivalents, so 42 ranks idle -- and an A/B of
+    # 48x1 against a plain single process was 6 s versus 7 s. At these dataset
+    # sizes the fit simply does not scale.
+    #
+    # What 48 does buy is a queue wait. Triton's sumo partition runs 58 jobs
+    # with 31 pending, so a 48-CPU request sits at PD (Resources) while an
+    # 8-CPU one backfills. For a workflow whose point is to finish quickly the
+    # wait is the dominant cost, not the fit.
+    #
+    # Revisit if a later iteration's fit starts taking minutes rather than
+    # seconds -- by then the dataset is large enough for the ranks to have work.
+    ntasks: 8
+    cpus_per_task: 1
+    # Two hours rather than a day. This fit is small and, if it does hit the
+    # limit, that is worth finding out in two hours rather than the next day.
+    time: "02:00:00"
+  hyperparameters_file: gap_hypers.yaml
+
+  mpi_ranks: 8
+  num_processes: 1
+
+  # e*Angstrom. Water's monomer dipole is 1.85 D = 0.385 e*A, so this is about
+  # 5% of it -- the same fraction of the target that ethanol's 0.02 is of its
+  # 1.69 D.
+  default_dipole_sigma: 0.02
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  e0:
+    H: 0.0
+    O: 0.0
+
+  gap_file_name: water_dipole_density.xml
+
+energy_fit:
+  enabled: false
+
+validation:
+  enabled: true
+  source: generate
+  n_select: 12
+  seed_offset: 1000
+
+  # Tested at the top of the ladder, for the reason given in the ethanol
+  # workflow: a test set of monomers would score a model that fails on
+  # 20-molecule clusters as a success.
+  sampling:
+    cluster_ladder: [20]
+    # Liquid density, which is *between* the two training densities and is the
+    # physically meaningful one. This makes the test an interpolation across
+    # density rather than a score on the edge of the training range -- and it is
+    # the condition an infrared spectrum would actually be computed at.
+    cluster_densities: [0.0334]
+
+  # e*Angstrom, about 8% of the monomer's 0.385 e*A.
+  tolerance: 0.03
+
+  max_iterations: 10
+  min_iterations: 3

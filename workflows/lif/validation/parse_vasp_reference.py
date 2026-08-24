@@ -82,6 +82,10 @@ def main() -> None:
     parser.add_argument("--dipole-key", default="mu")
     parser.add_argument("--polarizability-key", default="alpha")
     parser.add_argument("--min-vacuum", type=float, default=8.0)
+    parser.add_argument("--keep-open-shell", action="store_true",
+                        help="harvest odd-electron frames too. VASP reports a "
+                             "dipole for them that is not the ground state, and "
+                             "says nothing about it.")
     parser.add_argument("--no-strict-vacuum", action="store_true",
                         help="derive a polarizability even in too small a box; "
                              "the value will be too large, and silently so")
@@ -95,6 +99,29 @@ def main() -> None:
     all_problems: list[tuple[str, list[str]]] = []
 
     for i, directory in enumerate(directories):
+        atoms_source = (
+            submitted[i] if submitted is not None else read(directory / "POSCAR")
+        )
+
+        # The last gate before this becomes training data.
+        #
+        # An odd electron count is an unpaired electron, and VASP does not
+        # refuse it: it fills the half-occupied level with a fractional
+        # occupation, converges, and reports a dipole and a polarizability that
+        # are not the ground state. Nothing in the OUTCAR marks them. So the
+        # check has to happen here, on the composition, rather than by looking
+        # for a complaint that never comes.
+        #
+        # Dropped rather than flagged, because a grand-canonical walk exchanging
+        # whole neutral LiF units never produces one -- these come from the
+        # control set -- and FHI-aims will not compute them at all, so keeping
+        # them makes the two codes' reference sets incomparable as well.
+        if not args.keep_open_shell and int(sum(atoms_source.get_atomic_numbers())) % 2:
+            print(f"  dropped {directory.name}: "
+                  f"{atoms_source.get_chemical_formula()} is open-shell")
+            counts["open_shell"] += 1
+            continue
+
         try:
             outcar = find_vasp_output(directory)
         except Exception as exc:  # noqa: BLE001
@@ -102,7 +129,7 @@ def main() -> None:
             counts["failed"] += 1
             continue
 
-        atoms = (submitted[i] if submitted is not None else read(directory / "POSCAR")).copy()
+        atoms = atoms_source.copy()
 
         ef = parse_vasp_energy_forces(outcar)
         vacuum = minimum_vacuum(atoms.get_positions(), atoms.cell.array)
@@ -147,7 +174,8 @@ def main() -> None:
     write(args.out, harvested)
 
     print(f"harvested {len(harvested)} of {len(directories)} calculations -> {args.out}")
-    for key in ("energy", "forces", "dipole", "polarizability", "failed"):
+    for key in ("energy", "forces", "dipole", "polarizability", "failed",
+                "open_shell"):
         print(f"  with {key:16s} {counts[key]:4d}")
 
     print("\nphysical summary:")

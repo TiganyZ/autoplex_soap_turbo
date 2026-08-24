@@ -130,7 +130,22 @@ class TurbogapMCSettings(TurbogapMDSettings):
     mc_mu_acceptance: list[float] = field(default_factory=list)
     mc_mu_reference: str = DEFAULT_MU_REFERENCE
     mc_types: list[str] = field(default_factory=lambda: list(DEFAULT_MC_TYPES))
+
+    #: Which move types trigger a post-move relaxation, by name. Only meaningful
+    #: with ``mc_relax`` set in :attr:`keywords`; leave empty and ``mc_relax``
+    #: applies to every accepted move.
+    #:
+    #: First-class rather than left to :attr:`keywords` because turboGAP reads
+    #: ``n_mc_relax_after`` to allocate the list, exactly as it does for
+    #: ``mc_mu`` -- and a caller writing only the list gets a walk that starts,
+    #: runs and relaxes nothing.
+    mc_relax_after: list[str] = field(default_factory=list)
     mc_acceptance: list[float] = field(default_factory=list)
+
+    def relaxes(self) -> bool:
+        """Whether the walk runs a geometry optimisation of its own."""
+        value = self.keywords.get("mc_relax")
+        return str(value).strip().lower() in (".true.", "true", "t", "1", "yes")
 
     def exchanges(self) -> bool:
         """Whether any move changes the number of atoms."""
@@ -180,6 +195,14 @@ class TurbogapMCSettings(TurbogapMDSettings):
                     "by position."
                 )
 
+        unknown_relax = sorted(set(self.mc_relax_after) - set(self.mc_types))
+        if unknown_relax:
+            raise ValueError(
+                f"mc_relax_after names {unknown_relax}, which are not in "
+                f"mc_types ({sorted(self.mc_types)}). A relaxation can only "
+                "follow a move the walk actually makes."
+            )
+
         if self.mc_mu_reference not in ("e0", "absolute"):
             raise ValueError(
                 f"mc_mu_reference is {self.mc_mu_reference!r}; turboGAP accepts "
@@ -215,6 +238,11 @@ class TurbogapMCSettings(TurbogapMDSettings):
             if self.mc_molecule_files:
                 keywords["mc_molecule_files"] = _quoted_list(self.mc_molecule_files)
             keywords["mc_mu_reference"] = f'"{self.mc_mu_reference}"'
+
+        if self.mc_relax_after:
+            # n_mc_relax_after first, for the same reason as n_mc_mu.
+            keywords["n_mc_relax_after"] = len(self.mc_relax_after)
+            keywords["mc_relax_after"] = _quoted_list(self.mc_relax_after)
 
         # Caller overrides win, as they do for MD.
         keywords.update(self.keywords)

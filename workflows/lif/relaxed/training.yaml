@@ -1,0 +1,589 @@
+# LiF dipole model, Mode B, FHI-aims reference, with a *relaxing* GCMC walk.
+#
+#     python workflows/lif/aims/run.py --dry-run
+#     python workflows/lif/aims/run.py
+#
+# The same shape as workflows/lif/aims/training.yaml -- a frozen energy/force GAP
+# drives a grand-canonical walk against FHI-aims reference data, only the dipole
+# model iterates, and an independent test set decides when to stop -- with one
+# thing changed: the walk relaxes the geometry after every accepted exchange.
+#
+# What that buys, and what it costs.
+#
+# A plain grand-canonical walk accepts a trial position and moves on. An
+# insertion that lands in a bonding site but at the wrong bond length is
+# accepted on its Metropolis weight and written to the trajectory as-is, so the
+# candidate set fills with configurations that are *nearly* right -- strained
+# bonds, slightly wrong coordination -- rather than with the relaxed geometries a
+# real cluster occupies. For an energy model that is useful: near-misses carry
+# force information. For a *dipole* model it is less so. The dipole of a
+# strained LiF unit is not wrong, but it is a configuration the model will never
+# be asked about, and every one of them costs an FHI-aims calculation.
+#
+# mc_relax runs a short gradient descent after each accepted exchange, so what
+# reaches the training set is a relaxed cluster. The cost is one energy/force
+# evaluation per relaxation step per accepted move -- with mc_nrelax: 20 and an
+# acceptance rate around a third, roughly seven times the potential evaluations
+# of the plain walk. That is cheap next to the DFT it feeds, which is the whole
+# argument for doing it.
+#
+# Run this alongside workflows/lif/aims/ rather than instead of it: they share a
+# seed, a test set protocol and a tolerance, so the difference in convergence is
+# attributable to the relaxation and nothing else.
+#
+# That is the whole difference, and it is expressed by which section is written.
+# There is no `backend:` key to fall out of step with the settings: an `aims:`
+# section selects FHI-aims, a `vasp:` section selects VASP, and both at once is
+# refused.
+#
+# Why run the same system through a second code at all: the dipole is the one
+# quantity in this workflow with no experimental value per configuration, so the
+# only check available on a fitted model is whether two independent codes agree.
+# The VASP run's monomer landed 2.3-3.6% below the experimental 6.3247 D, which
+# is the PBE underestimate; FHI-aims with the same functional should land in the
+# same place, and a disagreement larger than that is a setup problem in one of
+# them rather than physics.
+
+name: lif_dipole_relaxed
+species_list: [Li, F]
+project: autoplex
+
+# Superseded by validation.max_iterations below, which is what bounds this run.
+iterations: 3
+
+dataset:
+  # Structures only -- no dipoles on them. FHI-aims has never been run on this
+  # system, so there is nothing to seed iteration 0 with, and the flow computes
+  # it: `seed structures` -> `aims seed` -> `prepare dataset`. That is the whole
+  # point of starting from geometries rather than from a dataset.
+  #
+  # 18 frames, from workflows/lif/validation/reference_set.xyz: one per cluster
+  # size from the calibrated mu = -7.0 grand-canonical walk, plus isolated
+  # clusters from the existing LiF training set as controls.
+  #
+  # Four of that file's 22 frames are not here. Li12F15, Li15F18, Li17F18 and
+  # Li17F20 are non-stoichiometric, and Li_n F_m carries 3n + 9m = 3(n + 3m)
+  # electrons, whose parity follows n + m -- so an odd-atom cluster is an
+  # open-shell radical. FHI-aims is asked to compute these as closed-shell
+  # molecules and refuses; the flow now refuses first, at submission.
+  #
+  # Dropping them is the right call regardless of which code complains. The
+  # grand-canonical walk exchanges whole neutral LiF units and can only ever
+  # produce stoichiometric clusters, so a radical is a physical regime the model
+  # will never be asked about -- and fitting one dipole model across both asks
+  # it to learn two different things.
+  #
+  # Note for the VASP side: those four frames do *not* fail there. VASP fills the
+  # half-occupied level with a fractional occupation and finishes, reporting a
+  # number that is not the ground state and saying nothing about it.
+  # 235 converged FHI-aims calculations recovered from earlier campaigns, by
+  # scripts/salvage_aims_data.py. These already carry `mu` and `alpha`, so the
+  # `seed structures` -> `aims seed` stage is skipped entirely and iteration 0
+  # fits immediately -- the node hours behind these frames were already spent.
+  #
+  # How the 235 were arrived at from 594 recoverable directories:
+  #   --species Li F    excluded 40 water and 24 ethanol frames. The worker's
+  #                     run/aims tree is shared by every campaign that has used
+  #                     the machine, and those frames are perfectly valid --
+  #                     they would simply have trained one model for three
+  #                     unrelated chemistries.
+  #   settings group    excluded 32 frames run with basis_threshold 1e-4, which
+  #                     reduced the basis to 1238 functions and so are not
+  #                     comparable with the rest.
+  #   min_separation    excluded 11 collapsed geometries (shortest 0.624 A),
+  #                     from before the core_pot fix.
+  #   novelty filter    collapsed the remaining 487 to 235 distinct
+  #                     configurations, at a threshold calibrated against the
+  #                     set's own nearest-neighbour spacing.
+  initial: ../data/dipole_dataset.xyz
+
+  dipole_key: mu
+  polarizability_key: alpha
+
+  # What the harvest writes, not what the file holds -- the file holds no
+  # dipoles at all. FHI-aims reports mu in atomic units and alpha in bohr^3, and
+  # autoplex_soap_turbo.aims.parse converts both on the way out, so by the time
+  # anything reads them they are already canonical. These keys describe the
+  # convention everything downstream works in.
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+
+  # Matches the cell the structures were reboxed to. It has to: a polarizability
+  # is a property of the object in *this* box, and the VASP box scan showed the
+  # error is one-directional -- too large in a small box, by +0.4% at 8.44 A of
+  # image separation -- so an under-converged value looks converged.
+  box: 20.0
+
+  # Isolated clusters. A total dipole moment is only well defined for a
+  # non-periodic system, and FHI-aims computes these as molecules.
+  periodic: false
+
+  train_fraction: 0.8
+  seed: 0
+
+sampling:
+  worker: roihu_cpu_turbogap
+
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 128
+    time: "02:00:00"
+
+  method: gcmc
+
+  # The already-converted turboGAP **.gap**, not the QUIP .xml beside it.
+  #
+  # This was pointed at the .xml, so the flow re-ran the conversion every
+  # iteration -- and the conversion is lossy in exactly the way that matters.
+  # GAP keeps its core repulsion as a spline in a separate file rather than as a
+  # sparse GP, so `core_pot` descriptors carry an empty sparse set;
+  # convert_gap_to_turbogap strips those, because turboGAP aborts on a
+  # descriptor with no sparse points. The rebuilt potential had no short-range
+  # repulsive wall.
+  #
+  # The measured cost: core_pot_2.dat puts Li-F at 836 eV at 0.1 A. Without it
+  # a relaxation walks straight downhill into a spurious minimum -- candidates
+  # came back with a 0.389 A shortest bond against a 1.564 A equilibrium, and
+  # FHI-aims aborted at basis setup on two thirds of them.
+  #
+  # LiF.gap was converted once, with its core_pot_*.dat and alphas_*.dat beside
+  # it, so it has everything. The flow now copies it rather than rebuilding it,
+  # and its whole gap_files/ directory has to stay with it -- the .gap names
+  # those files by relative path.
+  energy_potential: /scratch/project_2017844/gap_calculations/lif_dipole_test/gap_files/LiF.gap
+
+  carry_dipole_model: true
+
+  mc_species: [LiF]
+  mc_molecule_files: [lif_unit.xyz]
+  mc_mu_reference: e0
+
+  # Calibrated against this cluster, not guessed, and not transferable. At the
+  # bulk formation energy (-8.58 eV/formula unit) the walk accepted one
+  # insertion in 124 attempts and reported nothing wrong; mu competes against
+  # the *insertion* energy, about -6.2 eV here. See
+  # workflows/lif/validation/gcmc_report.py.
+  mc_mu: [-7.5]
+
+  mc_types: [move, insertion, removal]
+  mc_acceptance: [2, 1, 1]
+
+  # Relax after an exchange, not after a plain displacement.
+  #
+  # An insertion or removal changes the composition and leaves its neighbours in
+  # the geometry they had before the unit arrived or left -- that is the trial
+  # worth relaxing. A "move" is a single small displacement, already drawn
+  # inside mc_move_max, and relaxing after each one would spend most of the
+  # walk's potential evaluations undoing the sampling it just did.
+  #
+  # Written here rather than in the `mc` block below because turboGAP reads
+  # `n_mc_relax_after` to allocate this list, exactly as it does for `mc_mu`.
+  # Given as a bare list in `mc` the count is missing, and the walk starts, runs
+  # to completion and relaxes nothing -- with no error anywhere.
+  mc_relax_after: [insertion, removal]
+
+  n_candidates: 200
+  discard_initial: 2
+
+  mc:
+    mc_nsteps: 600
+    mc_move_max: 0.3
+
+    # ---- post-move relaxation ----
+    mc_relax: .true.
+
+    # Steps per accepted exchange. Enough to pull a mis-placed unit into its
+    # bonding site, not so many that the walk becomes a sequence of local
+    # minimisations and stops sampling. Raise it and the candidates converge on
+    # a handful of distinct minima, which is the opposite of what a training set
+    # wants.
+    mc_nrelax: 40
+
+    # Gradient descent on the positions. "vv" would run velocity-Verlet
+    # dynamics, which re-heats what the relaxation is trying to settle;
+    # "gd-box" would relax the cell too, which is meaningless for an isolated
+    # cluster in a fixed 20 A box.
+    mc_relax_opt: gd
+
+    # Convergence for that descent. Loose on purpose: the relaxation exists to
+    # remove gross strain, not to find the minimum. f_tol at the default 0.01
+    # eV/A would spend the whole mc_nrelax budget on the last few percent.
+    f_tol: 0.05
+    max_opt_step: 0.1
+
+    # Below the 1.564 A Li-F bond: an insertion can land in a bonding position
+    # but not on top of an existing atom.
+    mc_min_dist: 1.2
+    # The keyword that decides whether the walk works at all in a large box.
+    # Without it an insertion is placed uniformly in the cell, which for a 3 A
+    # cluster in a 20 A box is vacuum essentially every time -- an unbound LiF
+    # unit, always rejected, and no error anywhere.
+    mc_max_dist: 3.5
+    t_beg: 500.0
+    write_xyz: 5
+
+  rattle_stdev: 0.08
+
+selection:
+  method: fps
+  n_select: 20
+
+  # Geometry sanity, applied before diversity.
+  #
+  # Farthest-point selection prefers whatever is least like the training set,
+  # which is precisely the collapsed structures -- so without this the frames
+  # most likely to be chosen are the ones no DFT code can compute. A relaxing
+  # walk on a potential that lost its core repulsion produced candidates with a
+  # 0.389 A shortest bond, and FHI-aims aborted at setup on two thirds of them.
+  #
+  # 1.2 A sits below the 1.564 A equilibrium Li-F bond, so a genuinely
+  # compressed configuration still gets through -- those are worth having -- and
+  # only the unphysical ones go.
+  min_separation: 1.2
+  r_cut: 6.0
+  n_bins: 40
+  sigma: 0.2
+
+# ---------------------------------------------------------------- FHI-aims ---
+#
+# Writing this section, rather than a `vasp:` one, is what selects the backend.
+aims:
+  worker: roihu_cpu_aims
+  exec_config: roihu_aims_config
+
+  # One Slurm job per structure, sized to that structure.
+  #
+  # A single request cannot serve this batch. The seed frames are 10-40 atoms;
+  # the grand-canonical walk grows clusters to ~200, and at mu = -7.0 on this
+  # seed it reached 202 over 600 steps. Size for the large end and a 10-atom
+  # cluster reserves two nodes to do a few core-minutes of work. Size for the
+  # small end and the large ones time out.
+  #
+  # The ladder is set by basis-function count, following
+  # https://fhi-aims.org/uploads/manual/Ch3/S47.html. Counting the uncommented
+  # radial functions in defaults_2020/tight and weighting each by 2l+1:
+  #
+  #     Li  ~30 basis functions   (minimal 1s 2s, plus 2p 2s 3d 3p 2p 3s 4d 4f)
+  #     F   ~39                   (minimal 1s 2s 2p, plus 2p 3d 3s 4f 2p 1s 4d 5g)
+  #
+  # so LiF runs about 35 per atom. Aiming at roughly 10-30 basis functions per
+  # MPI rank keeps the ScaLAPACK grid sensible: below a few functions per rank
+  # the distributed eigensolver spends its time communicating, and with fewer
+  # functions than ranks it fails outright rather than merely running badly.
+  #
+  #      atoms   basis fn   ranks   fn/rank
+  #         24       ~830      32        26
+  #         48      ~1650      64        26
+  #         96      ~3300     128        26
+  #        150      ~5200     384        14
+  #        200      ~6900     768         9
+  #
+  # Roihu nodes are 384 cores and 762 GB. `small` takes up to one node; two
+  # nodes has to go to `medium`. The account and partition must be repeated in
+  # every tier: jobflow-remote replaces the worker's resources with these rather
+  # than merging, so a request that omits them submits with no association and
+  # Slurm rejects it with a message about job limits.
+  #
+  # Matched in order, first tier whose max_atoms the structure does not exceed.
+  # The last is the catch-all and must be `max_atoms: null` -- without one, a
+  # structure bigger than every tier would submit with the worker's default,
+  # which is the case that most needs a deliberate request.
+  # The dispatcher's own request -- the job that reads the structures and builds
+  # one calculation per structure. It is a few seconds of Python and needs a
+  # single core; without this it falls back to the worker's default of a
+  # 128-core node and queues behind real work to do nothing.
+  #
+  # This request is deliberately not inherited by the calculations it generates:
+  # the worker and exec_config are, because they name the machine and the
+  # environment, but the resources are not, or the tiers below would never take
+  # effect.
+  resources:
+    account: project_2017844
+    partition: small
+    nodes: 1
+    ntasks_per_node: 1
+    time: "00:15:00"
+
+  resource_tiers:
+    # Most of the seed batch, and the small end of every walk.
+    - max_atoms: 24
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 32
+        time: "02:00:00"
+
+    - max_atoms: 48
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 64
+        time: "03:00:00"
+
+    - max_atoms: 96
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 128
+        time: "06:00:00"
+
+    # A whole node.
+    - max_atoms: 150
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 384
+        time: "10:00:00"
+
+    # Two nodes, on `medium`, because `small` is single-node. This is the tier
+    # the ~200-atom clusters the walk reaches land in, and DFPT on one of those
+    # is the most expensive calculation in the run.
+    - max_atoms: null
+      resources:
+        account: project_2017844
+        partition: medium
+        nodes: 2
+        ntasks_per_node: 384
+        time: "1-00:00:00"
+
+  # Isolated clusters, not a periodic solid.
+  molecular: true
+
+  # Merged over the defaults in autoplex_soap_turbo.aims.jobs.
+  user_params:
+    # 'tight' rather than 'light'. A dipole is a first moment of the density and
+    # the polarizability is its response, so both are dominated by the diffuse
+    # tail of the basis -- exactly where 'light' truncates. This is the FHI-aims
+    # analogue of the ENCUT: 700 choice on the VASP side.
+    species_dir: tight
+
+    # The same functional the VASP run used, which is the whole point of running
+    # both: a difference between the two codes should then be a difference in
+    # implementation, not in physics.
+    xc: pbe
+
+    output_level: normal
+
+    # Both of these must survive into control.in or the run completes with
+    # nothing to harvest. DFPT is what produces the polarizability; `dipole` in
+    # `output` is what produces the dipole. A run missing either finishes
+    # cleanly and contributes no target -- see the harvest counts below.
+    electric_field_response: DFPT
+    output: [dipole, mulliken]
+
+    # Forces come from the same SCF and cost nothing extra. They are not fitted
+    # here (energy_fit is off) but they go into the dataset, so switching the
+    # energy fit on later needs no new DFT.
+    compute_forces: true
+
+    # basis_threshold is LEFT AT ITS DEFAULT (1e-5), deliberately, after
+    # raising it turned out to cause the failure it was meant to fix.
+    #
+    # The reasoning that raised it to 1e-4: frames were dying with "No SCF steps
+    # present, calculation failed at setup", which is FHI-aims refusing an
+    # ill-conditioned overlap matrix, and a larger threshold projects the
+    # offending combinations out. That was the wrong diagnosis -- those frames
+    # were the collapsed 0.389 A geometries from a potential with no core
+    # repulsion, and they are gone now for that reason, not this one.
+    #
+    # What 1e-4 then did to real geometries, measured on a 36-atom cluster:
+    #
+    #     Overlap matrix is singular
+    #     | Lowest and highest eigenvalues :  0.5144E-04,  0.1834E+02
+    #     | Number of basis functions reduced to :      1238
+    #
+    # 5.1e-5 sits above the default 1e-5 and below the raised 1e-4, so the
+    # default leaves the basis alone and the raised value removes functions from
+    # it. The SCF converged either way; DFPT did not -- one MPI rank died inside
+    # the CPSCF and took the step down with it ("tasks 0-44,46-63: Terminated",
+    # rank 45 being the one that went). FHI-aims' response calculation is
+    # fragile on a basis that singularity removal has reduced.
+    #
+    # So: do not raise this to paper over a geometry problem. Fix the geometry.
+
+
+    # A cluster in a mostly-empty box converges slowly with the default mixing,
+    # for the same reason the VASP side needed AMIX/BMIX damping.
+    charge_mix_param: 0.1
+    n_max_pulay: 10
+    sc_accuracy_rho: 1.0e-6
+    sc_accuracy_eev: 1.0e-3
+    sc_accuracy_etot: 1.0e-6
+    sc_iter_limit: 2000
+
+    # An ionic cluster has a real gap, but a small one at the surface. A little
+    # broadening keeps the SCF from oscillating between two occupations without
+    # measurably moving the dipole.
+    occupation_type: gaussian 0.01
+
+    # ---- parallelisation, per https://fhi-aims.org/uploads/manual/Ch3/S47.html
+    #
+    # The distributed eigensolver, rather than collecting the whole matrix on
+    # every rank. Required before any of the memory optimisations below mean
+    # anything, and the right choice for everything in this run except possibly
+    # the very smallest seed frames, where it costs a little.
+    KS_method: parallel
+
+    # Continue through an overlap matrix FHI-aims has judged ill-conditioned.
+    #
+    # For a large cluster this is a numerical fact rather than a broken
+    # geometry: 'tight' gives F a 5g and Li a 4f, and by a couple of hundred
+    # atoms enough of those combinations are near-degenerate that the default
+    # check stops the run before a single SCF step -- reported downstream as
+    # "No SCF steps present, calculation failed at setup".
+    #
+    # Kept as the safety net for a genuinely large system, where near-degenerate
+    # combinations are a numerical fact rather than a broken geometry. Verified
+    # to reach control.in verbatim -- pymatgen passes user_params through
+    # untouched, so a keyword landing in the file is not something to assume.
+    #
+    # What it does NOT excuse is a collapsed geometry. Atoms at 0.4 A are not
+    # an ill-conditioned basis, they are a broken sampler, and the guard for
+    # those is selection.min_separation -- not this.
+    override_illconditioning: .true.
+
+    # The Hartree multipole splines are otherwise stored in full on every rank,
+    # which is the term that grows with system size rather than with rank count.
+    distributed_spline_storage: true
+
+    # Deliberately NOT set, and this is where to look first if the >150-atom
+    # frames run out of memory or wall time:
+    #
+    #   use_local_index    stores only the part of the Hamiltonian and overlap
+    #                      matrices touched by this rank's grid points. FHI-aims
+    #                      turns it on by itself at 100+ atoms, so the large
+    #                      tier already gets it; it is left at that default
+    #                      rather than forced, because the manual notes it needs
+    #                      testing outside standard functionals and none of it
+    #                      has been checked against DFPT here.
+    #   load_balancing     recovers the performance use_local_index costs.
+    #                      Recommended alongside it, and the natural companion
+    #                      change if the above is turned on explicitly.
+    #   collect_eigenvectors .false.   saves memory and time -- but DFPT works
+    #                      from the eigenvectors, so this is the one to test
+    #                      rather than assume.
+    #   use_alltoall       for runs above ~1000 MPI tasks. The largest tier here
+    #                      is 768, so it does not apply yet.
+    #
+    # Each of these changes what is computed, not just how fast. Verify the
+    # monomer dipole is unchanged before trusting a batch run with any of them.
+
+  # False lets a batch through when one structure fails to converge: 19 of 20
+  # frames is a usable iteration, and losing the other 19 to it is not.
+  require_all: false
+
+fit:
+  worker: triton_gapfit
+
+  resources:
+    account: sumo
+    partition: sumo
+    nodes: 1
+    # 48 ranks, one core each: the whole sumo node as pure MPI. ntasks must
+    # equal fit.mpi_ranks and cpus_per_task must equal fit.num_processes, or
+    # srun has no tasks to place.
+    ntasks: 48
+    cpus_per_task: 1
+    time: "1-00:00:00"
+
+  hyperparameters_file: ../gap_hypers.yaml
+  # Pure MPI: 48 ranks, one thread each.
+  #
+  # gap_fit here is QUIP_ARCH linux_x86_64_gfortran_openmpi. There is no
+  # `openmp` in that name -- gap_fit itself is not threaded, and MPI is the
+  # only parallelism it has. Launched as a single process, which is what this
+  # workflow did, the MPI layer sits idle: six real fits ran 17-36 s wall
+  # against 73-157 s of CPU on 48 allocated cores, and that factor of four to
+  # six was the threaded BLAS underneath, not gap_fit.
+  #
+  # num_processes is therefore 1, deliberately. Handing the BLAS 48 threads
+  # inside each of 48 ranks would oversubscribe the node 48-fold.
+  #
+  # Measured on one sumo node, same fit, same data:
+  #
+  #     1 rank  x 48 threads, chunk 100   7 s   <- what it was doing
+  #     1 rank  x 48 threads, chunk   8   7 s   <- chunk size does nothing
+  #     8 ranks x  6 threads              3 s
+  #     48 ranks x  1 thread              6 s   <- this
+  #
+  # 8x6 timed faster on that fit, but it is a 14-frame seed finishing in
+  # seconds, where threaded BLAS on a small dense solve flatters itself and
+  # startup is a large share of the total. Pure MPI is the parallelism gap_fit
+  # actually has, and it distributes the covariance matrix rather than
+  # replicating it -- which is what decides whether a large fit runs at all.
+  # Re-measure on a fit that takes minutes before trusting either number.
+  #
+  # The potentials from all four runs differ, and that is not a reason to
+  # distrust the MPI ones: two runs of the *same* configuration differ too,
+  # because gap_fit picks its sparse points by CUR and does not seed it.
+  mpi_ranks: 48
+  num_processes: 1
+
+  # Expected error on a dipole component, in e*Angstrom. One LiF unit carries
+  # about 1.28 e*Angstrom, against 0.6 for water, so the same fractional
+  # accuracy allows a looser absolute sigma than the water workflow.
+  default_dipole_sigma: 0.02
+
+  default_sigma: [0.001, 0.1, 0.1, 0.1]
+
+  # A pure dipole model has no isolated-atom energy.
+  e0:
+    Li: 0.0
+    F: 0.0
+
+  openmp_chunk_size: 100
+  gap_file_name: lif_dipole_relaxed.xml
+
+# Off: this is Mode B. The FHI-aims runs still produce energies and forces and
+# they sit in the dataset unfitted. Turning this on would refit the cluster
+# energy model each iteration, which changes what the walk explores and makes
+# the sampling non-reproducible across iterations.
+energy_fit:
+  enabled: false
+
+# --------------------------------------------------------------- validation ---
+#
+# The independent test set, and the rule that ends the run. Identical to the
+# VASP run's, so the two are directly comparable: the same tolerance, the same
+# budget, the same walk length.
+validation:
+  enabled: true
+
+  # Its own GCMC walk and its own FHI-aims batch, run once before the first fit.
+  # Possible only because this is Mode B: the walk needs an energy model, and
+  # the frozen potential is one that exists before anything has been fitted.
+  source: generate
+
+  n_select: 20
+
+  # A different random stream from the training sampler, so the two walks
+  # explore the same protocol independently.
+  seed_offset: 1000
+
+  # Merged key by key over `sampling`, one level into `mc` as well, so
+  # everything unlisted is inherited. Only the walk length differs: a longer
+  # walk reaches larger clusters than any single training iteration does, and
+  # large clusters are where a dipole model extrapolates worst.
+  sampling:
+    mc:
+      mc_nsteps: 1000
+
+  # Test RMSE per dipole component, e*Angstrom. About 2% of a single LiF unit's
+  # dipole, and inside the ~3% error PBE itself makes against the monomer's
+  # experimental value -- there is nothing to gain by converging the fit past
+  # the accuracy of the data it is fitted to.
+  tolerance: 0.03
+
+  # The budget for this generation protocol.
+  max_iterations: 10
+
+  # Iteration 0 is fitted to the 22 seed frames alone, which came from the same
+  # walk the test set's walk resembles. Letting it end the run would be letting
+  # the seed grade itself.
+  min_iterations: 2

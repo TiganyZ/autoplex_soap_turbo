@@ -351,3 +351,81 @@ def test_removing_every_dipole_route_is_refused():
     )
     with pytest.raises(ValueError, match="nothing to fit"):
         settings.merged_incar()
+
+
+# ------------------------------------------------------- the Gamma-only build ---
+#
+# An isolated cluster is Gamma-only, and vasp_gam would normally be the right
+# binary for it: real wavefunctions instead of complex ones, about half the
+# memory and time. custodian switches to it by itself, reading KSPACING out of
+# the INCAR and working out that the mesh is 1x1x1.
+#
+# It must not, here. vasp_gam refuses LEPSILON:
+#
+#     The Gamma-only version (vasp_gam) does not support the use of
+#     LEPSILON = .TRUE.. That is because some linear response routines
+#     require a complex shift to obtain stable convergence.
+#
+# and LEPSILON is the reason these calculations exist. Measured, not assumed:
+# a reference batch switched to vasp_gam by hand died on all 22 frames in under
+# 35 seconds each.
+
+
+def test_the_isolated_kspacing_really_does_read_as_gamma_only():
+    """Which is why the automatic switch has to be turned off explicitly.
+
+    custodian reproduces VASP's own formula, in which the 2*pi lives in the
+    k-point count rather than in the reciprocal lattice, so the number to clear
+    is 2*pi/L.
+    """
+    import numpy as np
+
+    from autoplex_soap_turbo.vasp.jobs import ISOLATED_KSPACING
+
+    for box in (15.0, 20.0, 25.0, 40.0):
+        reciprocal = 2.0 * np.pi / box
+        n_k = [int(max(1, np.ceil(reciprocal / ISOLATED_KSPACING))) for _ in range(3)]
+        assert np.prod(n_k) == 1, f"{box} A box would use {n_k} k-points"
+
+
+def test_a_response_calculation_pins_itself_to_the_standard_binary():
+    pytest.importorskip("atomate2.vasp.jobs.core")
+
+    from autoplex_soap_turbo.vasp.jobs import (
+        VaspDipoleSettings,
+        make_vasp_dipole_maker,
+    )
+
+    maker = make_vasp_dipole_maker(VaspDipoleSettings(molecular=True))
+    assert maker.run_vasp_kwargs["vasp_job_kwargs"]["auto_gamma"] is False
+
+
+def test_a_calculation_with_no_response_leaves_the_switch_alone():
+    """Without LEPSILON there is nothing vasp_gam cannot do, and it is faster."""
+    pytest.importorskip("atomate2.vasp.jobs.core")
+
+    from autoplex_soap_turbo.vasp.jobs import (
+        VaspDipoleSettings,
+        make_vasp_dipole_maker,
+    )
+
+    maker = make_vasp_dipole_maker(
+        VaspDipoleSettings(
+            molecular=True,
+            user_incar_settings={"LEPSILON": False, "LCALCPOL": False},
+        )
+    )
+    assert not maker.run_vasp_kwargs.get("vasp_job_kwargs", {})
+
+
+def test_a_molecular_calculation_asks_for_the_isolated_kspacing():
+    from autoplex_soap_turbo.vasp.jobs import (
+        ISOLATED_KSPACING,
+        VaspDipoleSettings,
+    )
+
+    settings = VaspDipoleSettings(molecular=True)
+    incar = dict(settings.merged_incar())
+    incar.setdefault("KSPACING", ISOLATED_KSPACING)
+
+    assert incar["KSPACING"] == ISOLATED_KSPACING

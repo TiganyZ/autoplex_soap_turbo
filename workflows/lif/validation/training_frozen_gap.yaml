@@ -59,11 +59,25 @@ sampling:
 
   method: gcmc
 
-  # The frozen model. This is what makes it Mode B.
+  # The already-converted turboGAP **.gap**, not the QUIP .xml beside it.
   #
-  # A turboGAP-format .gap file must keep its gap_files/ directory beside it --
-  # it names the sparse descriptor files by relative path, and moving the .gap
-  # without them gives a potential that loads and predicts nothing.
+  # This was pointed at the .xml, so the flow re-ran the conversion every
+  # iteration -- and the conversion is lossy in exactly the way that matters.
+  # GAP keeps its core repulsion as a spline in a separate file rather than as a
+  # sparse GP, so `core_pot` descriptors carry an empty sparse set;
+  # convert_gap_to_turbogap strips those, because turboGAP aborts on a
+  # descriptor with no sparse points. The rebuilt potential had no short-range
+  # repulsive wall.
+  #
+  # The measured cost: core_pot_2.dat puts Li-F at 836 eV at 0.1 A. Without it
+  # a relaxation walks straight downhill into a spurious minimum -- candidates
+  # came back with a 0.389 A shortest bond against a 1.564 A equilibrium, and
+  # FHI-aims aborted at basis setup on two thirds of them.
+  #
+  # LiF.gap was converted once, with its core_pot_*.dat and alphas_*.dat beside
+  # it, so it has everything. The flow now copies it rather than rebuilding it,
+  # and its whole gap_files/ directory has to stay with it -- the .gap names
+  # those files by relative path.
   energy_potential: /scratch/project_2017844/gap_calculations/lif_dipole_test/gap_files/LiF.gap
 
   # The dipole model fitted this iteration rides along in the same potential
@@ -127,21 +141,95 @@ vasp:
   worker: roihu_cpu_vasp
   exec_config: roihu_vasp_config
 
+  # One Slurm job per structure, sized to that structure, following
+  # https://vasp.at/wiki/Optimizing_the_parallelization.
+  #
+  # The rule there is to set the number of ranks to the default NBANDS divided
+  # by a small integer, and to keep NCORE a factor of the cores per node so the
+  # FFTs stay inside a node. With Li_sv (3 valence electrons) and F (7):
+  #
+  #     NELECT = 5 * n_LiF ,  NBANDS(default) ~ NELECT/2 + NIONS/2 = 3 * n_LiF
+  #
+  # so a 10-atom cluster has ~30 bands and a 200-atom one ~600. Ranks are then
+  # NBANDS/2 rounded to a multiple of NCORE:
+  #
+  #      atoms   NBANDS   ranks   bands/rank
+  #         24       72      32          2.3
+  #         48      144      64          2.3
+  #         96      288     128          2.3
+  #        150      450     192          2.3
+  #        200      600     256          2.3
+  #
+  # Overshooting is not free: VASP pads NBANDS up to a multiple of the number of
+  # band groups, so asking for more ranks than the bands support makes VASP
+  # invent empty bands and diagonalise them. The first attempt at the monomer
+  # ran 32 ranks on a 2-atom cell and NBANDS was padded to 32 for 4 electrons.
+  #
+  # These also carry the memory request. The default on `small` is 1 GB per
+  # core; DFPT on a 20 A box needs about 1.2 GB per rank, because LEPSILON holds
+  # the unoccupied bands alongside the occupied ones on a 360^3 grid. Left at
+  # the default, all 22 tasks of the first reference batch were OOM-killed
+  # partway through the response loop while the batch step still exited 0:0.
+  #
+  # Roihu nodes are 384 cores and 762 GB. Account and partition are repeated in
+  # every tier: jobflow-remote replaces the worker's resources with these rather
+  # than merging them.
+  # The dispatcher's own request: a few seconds of Python that builds one
+  # calculation per structure. Not inherited by those calculations -- the worker
+  # and exec_config are, the resources are not, or the tiers below would never
+  # take effect.
   resources:
     account: project_2017844
     partition: small
     nodes: 1
-    ntasks_per_node: 16
-    # Not optional, and not a safety margin. The default on `small` is 1 GB per
-    # core; a DFPT response on a 20 A box needs about 1.2 GB per rank, because
-    # LEPSILON holds the unoccupied bands alongside the occupied ones on a
-    # 360^3 grid. Left at the default, every task is OOM-killed partway through
-    # the response loop -- and the batch step still exits 0, so the failure is
-    # visible only in `sacct --format=State,MaxRSS` and in an OUTCAR that stops
-    # mid-run. 16 ranks rather than 32: the per-rank cost barely falls with
-    # rank count here, so more ranks is mostly more memory.
-    mem_per_cpu: 4G
-    time: "04:00:00"
+    ntasks_per_node: 1
+    time: "00:15:00"
+
+  resource_tiers:
+    - max_atoms: 24
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 32
+        mem_per_cpu: 4G
+        time: "04:00:00"
+
+    - max_atoms: 48
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 64
+        mem_per_cpu: 4G
+        time: "06:00:00"
+
+    - max_atoms: 96
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 128
+        mem_per_cpu: 4G
+        time: "10:00:00"
+
+    - max_atoms: 150
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 192
+        mem_per_cpu: 4G
+        time: "16:00:00"
+
+    - max_atoms: null
+      resources:
+        account: project_2017844
+        partition: small
+        nodes: 1
+        ntasks_per_node: 256
+        mem_per_cpu: 2G
+        time: "1-00:00:00"
 
   molecular: true
 
@@ -180,7 +268,32 @@ vasp:
     BMIX: 0.01
     AMIN: 0.01
 
+    # A factor of the cores per node, so an FFT never crosses a node boundary,
+    # and a factor of every rank count in the tiers above (32, 64, 128, 192,
+    # 256). VASP's own guidance is to start from the NUMA-domain size and
+    # benchmark from there.
     NCORE: 8
+
+    # Left at its default of 1, and deliberately. These are isolated clusters
+    # computed at Gamma only, so there is exactly one k-point and nothing for
+    # k-point parallelism to divide. KPAR > 1 here would idle most of the ranks.
+    # KPAR: 1
+    #
+    # Being Gamma-only would normally mean these run on vasp_gam rather than
+    # vasp_std -- real wavefunctions instead of complex ones, so about half the
+    # memory and close to half the time. They do not, and cannot:
+    #
+    #     The Gamma-only version (vasp_gam) does not support the use of
+    #     LEPSILON = .TRUE.. That is because some linear response routines
+    #     require a complex shift to obtain stable convergence.
+    #
+    # LEPSILON is the reason these calculations exist, so vasp_std it is. This
+    # is not academic: custodian will make the switch on its own -- it reads the
+    # KSPACING = 100 the flow sets for a molecular calculation, works out that
+    # the mesh is 1x1x1, and swaps in VASP_GAMMA_CMD -- so
+    # make_vasp_dipole_maker sets auto_gamma=False whenever the INCAR asks for a
+    # response. Without that, every calculation in this workflow dies in about
+    # 30 seconds with the message above.
 
   require_all: false
 

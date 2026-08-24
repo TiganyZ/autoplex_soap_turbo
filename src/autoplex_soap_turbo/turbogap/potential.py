@@ -40,7 +40,72 @@ DIPOLE_MODEL_FLAG = "dipole_model = .true."
 GAP_FILES_DIR = "gap_files"
 
 #: Keys inside a block whose values are paths needing rewriting.
-_PATH_KEYS = ("desc_sparse", "alphas_sparse", "file_compress_soap", "file_alphas")
+_PATH_KEYS = (
+    "desc_sparse", "alphas_sparse", "file_compress_soap", "file_alphas",
+    # The core repulsion's spline. Absent from this list, an adopted potential
+    # keeps pointing at the directory it was converted in and turboGAP dies in
+    # Fortran with a backtrace and no file name.
+    "core_pot_file",
+)
+
+
+def is_turbogap_format(path: str | Path) -> bool:
+    """Whether this is already a turboGAP potential rather than a GAP XML.
+
+    A turboGAP ``.gap`` opens with a ``gap_beg`` block; a QUIP XML opens with
+    ``<``. Cheap to tell apart, and worth telling apart: converting an XML loses
+    anything the converter cannot represent, and an already-converted potential
+    has kept it.
+    """
+    with Path(path).open() as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            return stripped.startswith("gap_beg")
+    return False
+
+
+def adopt_turbogap_potential(potential: str | Path, run_dir: str | Path, name: str) -> Path:
+    """Copy an already-converted potential and its data files into ``run_dir``.
+
+    The alternative -- re-converting the XML it came from -- is lossy. GAP
+    stores its core repulsion as a spline in a separate file rather than as a
+    sparse GP, so ``core_pot`` descriptors carry an empty sparse set;
+    ``convert_gap_to_turbogap`` strips those, because turboGAP aborts on a
+    descriptor with no sparse points. The rebuilt potential is then missing its
+    short-range repulsive wall, and the LiF core_pot spline says that wall is
+    worth 836 eV at 0.1 A. Without it a geometry optimiser walks straight
+    through where an atom should not be.
+
+    A potential that was converted once, with its ``core_pot_*.dat`` beside it,
+    has all of that. So it is copied, not rebuilt.
+    """
+    potential = Path(potential).resolve()
+    target = Path(run_dir) / GAP_FILES_DIR / name
+    target.mkdir(parents=True, exist_ok=True)
+
+    # Everything beside it, without exception. The turboGAP potential references
+    # the sparseX files directly -- they are its descriptors, not leftovers from
+    # the conversion -- so excluding them leaves a potential that names files
+    # which are not there.
+    for entry in potential.parent.iterdir():
+        if entry.is_file():
+            shutil.copy(entry, target / entry.name)
+
+    adopted = target / f"{name}.gap"
+    if potential.name != adopted.name:
+        shutil.copy(potential, adopted)
+        # The copy under its original name would otherwise sit beside this one,
+        # unrewritten, for the next reader to pick up by mistake.
+        (target / potential.name).unlink(missing_ok=True)
+
+    # The potential names its data files as `gap_files/x.dat`, resolved by
+    # turboGAP against the run directory; after this copy they are one level
+    # deeper.
+    _rewrite_paths(adopted, f"{GAP_FILES_DIR}/{name}/")
+    logger.info("adopted %s as %s (no reconversion)", potential.name, adopted)
+    return adopted
 
 
 def convert_potential(
@@ -89,7 +154,7 @@ def convert_potential(
     potential = target / f"{name}.gap"
     _rewrite_paths(potential, f"{GAP_FILES_DIR}/{name}/")
     logger.info("converted %s to %s", gap_xml.name, potential)
-    return potential
+    return potential, list(conversion.get("dropped_descriptors") or [])
 
 
 def _rewrite_paths(potential: Path, prefix: str) -> None:
@@ -195,15 +260,28 @@ def build_md_potential(
     if not energy_gap.is_file():
         raise FileNotFoundError(f"no energy potential at {energy_gap}")
 
-    converted = [convert_potential(energy_gap, species_list, run_dir, "energy")]
-    isolated_atom_energies = extract_isolated_atom_energies(energy_gap)
+    if is_turbogap_format(energy_gap):
+        # Already converted, and therefore complete. Nothing to extract e0 from
+        # either -- a turboGAP potential does not carry them; they go in the
+        # input file, and the caller supplies them.
+        energy_potential = adopt_turbogap_potential(energy_gap, run_dir, "energy")
+        dropped: list[str] = []
+        isolated_atom_energies = {}
+    else:
+        energy_potential, dropped = convert_potential(
+            energy_gap, species_list, run_dir, "energy"
+        )
+        isolated_atom_energies = extract_isolated_atom_energies(energy_gap)
+    converted = [energy_potential]
 
     n_dipole_blocks = 0
     if dipole_gap is not None:
         dipole_gap = Path(dipole_gap)
         if not dipole_gap.is_file():
             raise FileNotFoundError(f"no dipole potential at {dipole_gap}")
-        dipole_potential = convert_potential(dipole_gap, species_list, run_dir, "dipole")
+        dipole_potential, _ = convert_potential(
+            dipole_gap, species_list, run_dir, "dipole"
+        )
         n_dipole_blocks = mark_as_dipole_model(dipole_potential)
         converted.append(dipole_potential)
 
@@ -220,4 +298,9 @@ def build_md_potential(
         "potential_file": combined.relative_to(run_dir),
         "isolated_atom_energies": isolated_atom_energies,
         "n_dipole_blocks": n_dipole_blocks,
+        # What the conversion had to throw away. `core_pot` in here means the
+        # model has no short-range repulsive wall, which decides whether a
+        # geometry optimiser can be trusted with it -- see
+        # `TurbogapMCSettings.relaxes()` and the check in prepare_mc_directory.
+        "dropped_descriptors": dropped,
     }

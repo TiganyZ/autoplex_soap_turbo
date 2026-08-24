@@ -29,7 +29,11 @@ MINIMAL_SETTINGS = {
 @pytest.fixture
 def settings_dir(tmp_path):
     """A directory holding the files a settings file must point at."""
-    (tmp_path / "initial.xyz").write_text("1\nProperties=species:S:1:pos:R:3\nH 0 0 0\n")
+    # H2, not a lone H: a single hydrogen has one electron, and the flow now
+    # refuses an open-shell frame for a molecular FHI-aims run.
+    (tmp_path / "initial.xyz").write_text(
+        "2\nProperties=species:S:1:pos:R:3\nH 0 0 0\nH 0 0 0.74\n"
+    )
     (tmp_path / "hypers.yaml").write_text("GAP:\n  general:\n    soap_turbo: true\n")
     return tmp_path
 
@@ -564,7 +568,7 @@ def test_a_missing_validation_file_is_refused(settings_dir):
 
 def test_a_validation_file_that_exists_is_accepted_without_a_frozen_potential(settings_dir):
     (settings_dir / "test.xyz").write_text(
-        "1\nProperties=species:S:1:pos:R:3\nH 0 0 0\n"
+        "2\nProperties=species:S:1:pos:R:3\nH 0 0 0\nH 0 0 0.74\n"
     )
     path = write_settings(
         settings_dir,
@@ -617,3 +621,258 @@ def test_the_validation_section_survives_a_round_trip_through_the_job_store(sett
     assert restored.validation.enabled is True
     assert restored.validation.tolerance == 0.03
     assert restored.validation.max_iterations == 7
+
+
+# ---------------------------------------------------- per-structure resources ---
+#
+# A grand-canonical batch holds frames spanning an order of magnitude in atom
+# count. Oversizing a small one is not just waste: both DFT codes distribute the
+# Hamiltonian over the ranks, so a 10-atom cluster on 384 of them has fewer
+# basis functions than processes and the linear algebra fails.
+
+
+TIERS = [
+    {"max_atoms": 48, "resources": {"nodes": 1, "ntasks_per_node": 48}},
+    {"max_atoms": 150, "resources": {"nodes": 1, "ntasks_per_node": 384}},
+    {"max_atoms": None, "resources": {"nodes": 2, "ntasks_per_node": 384}},
+]
+
+
+def test_a_structure_gets_the_first_tier_it_fits_in():
+    from autoplex_soap_turbo.aims.jobs import resources_for
+
+    assert resources_for(10, TIERS)["ntasks_per_node"] == 48
+    assert resources_for(48, TIERS)["ntasks_per_node"] == 48
+    assert resources_for(49, TIERS)["nodes"] == 1
+    assert resources_for(49, TIERS)["ntasks_per_node"] == 384
+    assert resources_for(200, TIERS)["nodes"] == 2
+
+
+def test_no_tiers_means_no_per_structure_request():
+    from autoplex_soap_turbo.aims.jobs import resources_for
+
+    assert resources_for(10, []) is None
+    assert resources_for(10, None) is None
+
+
+def test_tiers_without_a_catch_all_are_refused(settings_dir):
+    # A structure larger than every tier would otherwise submit with whatever
+    # the worker defaults to -- the case that most needs a deliberate request.
+    path = write_settings(
+        settings_dir,
+        aims={"resource_tiers": [{"max_atoms": 48, "resources": {"nodes": 1}}]},
+    )
+    with pytest.raises(ConfigError, match="no catch-all tier"):
+        TrainingConfig.from_file(path)
+
+
+def test_a_catch_all_that_is_not_last_is_refused(settings_dir):
+    path = write_settings(
+        settings_dir,
+        aims={
+            "resource_tiers": [
+                {"max_atoms": None, "resources": {"nodes": 1}},
+                {"max_atoms": 48, "resources": {"nodes": 1}},
+            ]
+        },
+    )
+    with pytest.raises(ConfigError, match="can never be reached"):
+        TrainingConfig.from_file(path)
+
+
+def test_a_tier_with_no_resources_is_refused(settings_dir):
+    path = write_settings(
+        settings_dir, aims={"resource_tiers": [{"max_atoms": None}]}
+    )
+    with pytest.raises(ConfigError, match="sets no resources"):
+        TrainingConfig.from_file(path)
+
+
+def test_a_misspelled_tier_key_is_refused(settings_dir):
+    path = write_settings(
+        settings_dir,
+        aims={
+            "resource_tiers": [
+                {"max_atom": 48, "resources": {"nodes": 1}},
+                {"max_atoms": None, "resources": {"nodes": 1}},
+            ]
+        },
+    )
+    with pytest.raises(ConfigError, match="max_atom"):
+        TrainingConfig.from_file(path)
+
+
+def test_valid_tiers_load(settings_dir):
+    path = write_settings(settings_dir, aims={"resource_tiers": TIERS})
+    settings = TrainingConfig.from_file(path)
+    assert len(settings.aims.resource_tiers) == 3
+
+
+def test_the_tiers_only_apply_to_the_backend_in_use(settings_dir):
+    # A vasp section with broken tiers is not checked when aims is the backend,
+    # because there is no vasp section at all -- and one written alongside aims
+    # is refused outright.
+    path = write_settings(settings_dir, aims={"resource_tiers": TIERS})
+    settings = TrainingConfig.from_file(path)
+    assert settings.reference_backend() == "aims"
+    assert settings.vasp is None
+
+
+# ------------------------------------------------------- collapsed geometries ---
+#
+# A sampler that has lost its short-range repulsion produces structures with
+# atoms on top of each other. Farthest-point selection *prefers* them -- they
+# are unlike everything already known, which is the entire criterion -- so
+# without a guard the frames most likely to reach DFT are the ones no
+# electronic-structure code can compute. Measured on LiF: a relaxing walk on a
+# potential whose core_pot was dropped gave a 0.389 A shortest bond, and
+# FHI-aims aborted during basis setup on two thirds of the batch.
+
+
+def lif_cluster(separation: float) -> Atoms:
+    """Two LiF units with one contact at the given separation."""
+    return Atoms(
+        "LiFLiF",
+        positions=[[0, 0, 0], [1.564, 0, 0],
+                   [1.564 + separation, 0, 0], [1.564 + separation + 1.564, 0, 0]],
+        cell=np.eye(3) * 20.0,
+        pbc=False,
+    )
+
+
+def test_the_shortest_separation_is_what_it_says():
+    from autoplex_soap_turbo.data.selection import shortest_separation
+
+    assert shortest_separation(lif_cluster(2.0)) == pytest.approx(1.564)
+    assert shortest_separation(lif_cluster(0.4)) == pytest.approx(0.4)
+    # A single atom has no separation to be short.
+    assert shortest_separation(Atoms("Li", positions=[[0, 0, 0]])) == float("inf")
+
+
+def test_collapsed_structures_are_dropped():
+    from autoplex_soap_turbo.data.selection import drop_collapsed
+
+    candidates = [lif_cluster(2.0), lif_cluster(0.389), lif_cluster(1.8)]
+    kept, rejected = drop_collapsed(candidates, min_separation=1.2)
+
+    assert len(kept) == 2
+    assert rejected == [pytest.approx(0.389)]
+
+
+def test_the_absolute_floor_applies_even_with_no_setting():
+    """No setting should be able to wave through a geometry DFT cannot describe."""
+    from autoplex_soap_turbo.data.selection import drop_collapsed
+
+    kept, rejected = drop_collapsed([lif_cluster(0.3), lif_cluster(2.0)], None)
+
+    assert len(kept) == 1
+    assert len(rejected) == 1
+
+
+def test_the_floor_sits_below_the_shortest_real_bond():
+    """H2 is 0.74 A. A floor above that would reject real chemistry."""
+    from autoplex_soap_turbo.data.selection import ABSOLUTE_MIN_SEPARATION
+
+    assert ABSOLUTE_MIN_SEPARATION < 0.74
+
+
+def test_a_compressed_but_real_geometry_survives():
+    """1.2 A on LiF is 77% of equilibrium -- strained, and worth having."""
+    from autoplex_soap_turbo.data.selection import drop_collapsed
+
+    kept, rejected = drop_collapsed([lif_cluster(1.25)], min_separation=1.2)
+    assert len(kept) == 1 and not rejected
+
+
+def test_min_separation_loads_from_the_settings_file(settings_dir):
+    path = write_settings(settings_dir, selection={"n_select": 5, "min_separation": 1.2})
+    assert TrainingConfig.from_file(path).selection.min_separation == 1.2
+
+
+def test_min_separation_is_off_unless_asked_for(settings_dir):
+    assert TrainingConfig.from_file(write_settings(settings_dir)).selection.min_separation is None
+
+
+def test_gap_fit_runs_as_one_process_unless_asked_otherwise(settings_dir):
+    """MPI only helps an MPI build, so it is not the default."""
+    assert TrainingConfig.from_file(write_settings(settings_dir)).fit.mpi_ranks is None
+
+
+def test_mpi_ranks_loads_and_survives_the_trip_to_a_worker(settings_dir):
+    from autoplex_soap_turbo.flows.iterative_dipole import _rehydrate
+
+    path = write_settings(
+        settings_dir,
+        fit={"hyperparameters_file": "hypers.yaml", "mpi_ranks": 8,
+             "num_processes": 6},
+    )
+    settings = TrainingConfig.from_file(path)
+    assert (settings.fit.mpi_ranks, settings.fit.num_processes) == (8, 6)
+    restored = TrainingConfig(**_rehydrate(settings.as_dict()))
+    assert restored.fit.mpi_ranks == 8
+
+
+# --------------------------------------------------------------------------
+# The size cap. A grand-canonical walk grows without an upper bound and
+# farthest-point selection prefers the largest thing it has seen, for the same
+# reason it prefers a collapsed one: nothing else looks like it. That
+# preference walked the first FHI-aims campaign into a 92-atom DFPT
+# calculation whose SCF did not converge in two thousand iterations.
+
+
+def _chain(n_units: int):
+    """A LiF chain of ``n_units`` formula units, in a box it fits inside."""
+    from ase import Atoms
+
+    length = 1.6 * (2 * n_units)
+    return Atoms(
+        "LiF" * n_units,
+        positions=[[1.6 * i, 0.0, 0.0] for i in range(2 * n_units)],
+        cell=[length + 20.0, 30.0, 30.0],
+        pbc=True,
+    )
+
+
+def _select(frames, max_atoms, n_select=2):
+    from autoplex_soap_turbo.flows.iterative_dipole import select_structures
+    from autoplex_soap_turbo.payload import frames_to_payload
+
+    empty = frames_to_payload([])
+    return select_structures.__wrapped__(
+        {"frames": frames_to_payload(frames)},
+        {"frames": {"train": empty, "test": empty}},
+        {
+            "name": "t",
+            "species_list": ["Li", "F"],
+            "selection": {"n_select": n_select, "max_atoms": max_atoms},
+            "dataset": {"initial": "unused.xyz"},
+        },
+        iteration=0,
+    )
+
+
+def test_oversized_candidates_are_not_sent_to_dft():
+    from autoplex_soap_turbo.payload import frames_from_payload
+
+    result = _select([_chain(4), _chain(5), _chain(6), _chain(50)], max_atoms=20)
+
+    assert result["n_oversized"] == 1
+    assert result["n_candidates"] == 3
+    chosen = frames_from_payload(result["frames"])
+    assert all(len(atoms) <= 20 for atoms in chosen)
+
+
+def test_a_cap_that_rejects_everything_says_so_rather_than_selecting_nothing():
+    """Silently selecting nothing would leave the iteration with no reference
+    data and no statement of why."""
+    import pytest
+
+    with pytest.raises(ValueError, match="max_atoms"):
+        _select([_chain(30)], max_atoms=20)
+
+
+def test_no_cap_means_no_cap():
+    result = _select([_chain(4), _chain(50)], max_atoms=None, n_select=2)
+
+    assert result["n_oversized"] == 0
+    assert result["n_candidates"] == 2

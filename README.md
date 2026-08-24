@@ -27,6 +27,13 @@ that samples configurations for the next round.
 empty machine to a fitted model in order, with LiF as the worked example. This
 README is the reference; that is the path through it.
 
+**Need a workflow that does not exist yet?**
+[`docs/custom-workflows.md`](docs/custom-workflows.md) covers building one — a
+multi-stage turboGAP protocol where each run starts from the last one's final
+configuration, a hyperparameter sweep off a fixed dataset, a new sampler or a
+new reference code — and the four rules that decide whether it works on a
+cluster or only on your laptop.
+
 ## Installation
 
 ```bash

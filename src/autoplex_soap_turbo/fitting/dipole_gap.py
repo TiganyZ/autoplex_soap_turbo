@@ -219,8 +219,31 @@ def run_gap_fit(
     num_processes: int = 1,
     workdir: str | Path | None = None,
     executable: str = "gap_fit",
+    mpi_ranks: int | None = None,
 ) -> Path:
-    """Run ``gap_fit`` and return the path to the potential it wrote."""
+    """Run ``gap_fit`` and return the path to the potential it wrote.
+
+    ``num_processes`` is OpenMP threads. ``mpi_ranks``, when set, launches under
+    ``srun`` with that many ranks and ``num_processes`` threads each -- so the
+    two multiply, and the product should be the cores the job was allocated.
+
+    Whether that is worth doing depends on the QUIP build. ``gap_fit --version``
+    reports its ``QUIP_ARCH``; a name containing ``openmpi`` is an MPI build,
+    and launching it as a single process leaves that layer idle. Measured on
+    Triton, one 48-core node, the same fit and the same data:
+
+        1 rank  x 48 threads, chunk 100   7 s   (what the workflow did)
+        1 rank  x 48 threads, chunk   8   7 s
+        48 ranks x  1 thread,  chunk   8   6 s
+        8 ranks x  6 threads,  chunk   8   3 s
+
+    So the hybrid is worth about 2.3x and pure MPI is not -- and the OpenMP
+    chunk size, which looked like the obvious culprit, does nothing at all.
+
+    The potentials from those runs all differ, and that is not a reason to
+    distrust the MPI ones: two runs of the *same* configuration differ too,
+    because gap_fit selects its sparse points by CUR and does not seed it.
+    """
     workdir = Path(workdir or Path.cwd())
     workdir.mkdir(parents=True, exist_ok=True)
 
@@ -236,12 +259,23 @@ def run_gap_fit(
 
     stdout_log = workdir / "gap_fit_out.log"
     stderr_log = workdir / "gap_fit_err.log"
-    logger.info("running gap_fit with %d thread(s) in %s", num_processes, workdir)
-    logger.debug("gap_fit %s", " ".join(arguments))
+
+    command = [executable, *arguments]
+    if mpi_ranks and mpi_ranks > 1:
+        command = [
+            "srun", "-n", str(mpi_ranks), "-c", str(num_processes), *command
+        ]
+        logger.info(
+            "running gap_fit on %d rank(s) x %d thread(s) in %s",
+            mpi_ranks, num_processes, workdir,
+        )
+    else:
+        logger.info("running gap_fit with %d thread(s) in %s", num_processes, workdir)
+    logger.debug("%s", " ".join(command))
 
     with stdout_log.open("w") as out, stderr_log.open("w") as err:
         result = subprocess.run(
-            [executable, *arguments],
+            command,
             stdout=out,
             stderr=err,
             cwd=workdir,
@@ -470,6 +504,7 @@ def fit_dipole_gap(
     test_file: str | Path | None = None,
     config: DipoleFitConfig | None = None,
     num_processes: int = 1,
+    mpi_ranks: int | None = None,
     gap_file_name: str = "dipole_gap.xml",
     check_executable: bool = True,
 ) -> dict:
@@ -495,7 +530,10 @@ def fit_dipole_gap(
         gap_file=gap_file_name,
         config=config,
     )
-    gap_path = run_gap_fit(arguments, num_processes=num_processes, workdir=output_dir)
+    gap_path = run_gap_fit(
+        arguments, num_processes=num_processes, workdir=output_dir,
+        mpi_ranks=mpi_ranks,
+    )
 
     results: dict = {
         "gap_file": str(gap_path),
@@ -561,8 +599,19 @@ def copy_potential(gap_file: str | Path, destination: str | Path) -> Path:
 
 
 def write_frames(path: str | Path, frames: list[Atoms]) -> Path:
-    """Write frames as extxyz, for callers that only need this one helper."""
+    """Write frames as extxyz, for callers that only need this one helper.
+
+    This is the file gap_fit reads, so the QUIP-readability guard has to run
+    here and not only in ``write_dataset``: a multi-column string property
+    aborts gap_fit outright rather than being ignored.
+    """
+    from autoplex_soap_turbo.data.dataset import (  # noqa: PLC0415
+        drop_unreadable_arrays,
+    )
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    frames = list(frames)
+    drop_unreadable_arrays(frames)
     write(path, frames, format="extxyz")
     return path

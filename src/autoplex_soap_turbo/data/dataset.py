@@ -54,13 +54,48 @@ def read_dataset(path: str | Path, index: str = ":") -> list[Atoms]:
     return frames if isinstance(frames, list) else [frames]
 
 
+def drop_unreadable_arrays(frames: Sequence[Atoms]) -> dict[str, int]:
+    """Remove per-atom arrays QUIP's xyz reader cannot parse back.
+
+    ASE will happily write a multi-column *string* property; QUIP refuses to
+    read one, and not with a warning:
+
+        libAtoms/xyz.c line 972 kind IO
+        String property fix_atoms with ncols != 1 no longer supported
+
+    That is an abort inside gap_fit, several machines and one queue away from
+    whatever wrote the array. turboGAP's ``fix_atoms`` is the known case -- three
+    columns of "T"/"F" per atom -- and it is stripped at the sampler, but this
+    is the last point before a file is handed to QUIP, so the general guard
+    belongs here too.
+
+    Returns the names dropped and how many frames each was dropped from, so the
+    caller can say what happened rather than silently changing the data.
+    """
+    dropped: dict[str, int] = {}
+    for atoms in frames:
+        for name in list(atoms.arrays):
+            values = atoms.arrays[name]
+            if values.dtype.kind in ("U", "S") and values.ndim > 1:
+                atoms.arrays.pop(name)
+                dropped[name] = dropped.get(name, 0) + 1
+    if dropped:
+        logger.warning(
+            "dropped per-atom array(s) QUIP cannot read: %s",
+            ", ".join(f"{k} (from {v} frame(s))" for k, v in sorted(dropped.items())),
+        )
+    return dropped
+
+
 def write_dataset(path: str | Path, frames: Sequence[Atoms]) -> Path:
     """Write an extxyz dataset, creating the parent directory."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not frames:
         raise ValueError(f"refusing to write an empty dataset to {path}")
-    write(path, list(frames), format="extxyz")
+    frames = list(frames)
+    drop_unreadable_arrays(frames)
+    write(path, frames, format="extxyz")
     return path
 
 

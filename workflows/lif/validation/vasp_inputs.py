@@ -153,6 +153,10 @@ def main() -> None:
     parser.add_argument("--variant", default="combined", choices=[*VARIANTS, "all"])
     parser.add_argument("--li-potcar", type=int, default=3, choices=[1, 3],
                         help="valence electrons on Li: 1 (standard) or 3 (Li_sv)")
+    parser.add_argument("--keep-open-shell", action="store_true",
+                        help="write inputs for odd-electron frames too. VASP "
+                             "will answer, and the answer will not be the "
+                             "ground state unless you also set ISPIN/NUPDOWN.")
     args = parser.parse_args()
 
     frames = read(args.xyz, ":") if args.xyz else [monomer()]
@@ -161,6 +165,27 @@ def main() -> None:
     for vname in variants:
         for i, atoms in enumerate(frames):
             directory = args.out / (vname if len(frames) == 1 else f"{vname}/frame_{i:04d}")
+
+            # An odd electron count means one unpaired electron. VASP will not
+            # refuse this -- it fills the half-occupied level fractionally and
+            # finishes -- but the dipole and polarizability it reports are not
+            # the ground state, and nothing in the OUTCAR says so. Leave a
+            # marker the batch script skips on, rather than inputs that produce
+            # a plausible wrong answer.
+            if int(sum(atoms.get_atomic_numbers())) % 2 and not args.keep_open_shell:
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "SKIPPED_OPEN_SHELL").write_text(
+                    f"{atoms.get_chemical_formula()} has "
+                    f"{int(sum(atoms.get_atomic_numbers()))} electrons, an odd "
+                    "number, so it is an open-shell radical. A spin-restricted "
+                    "calculation of it is not the ground state. Re-run with "
+                    "--keep-open-shell if you mean to compute it anyway, and "
+                    "set ISPIN=2 and NUPDOWN if you do.\n"
+                )
+                print(f"{directory}  {atoms.get_chemical_formula()}  n={len(atoms)}  "
+                      "SKIPPED (open shell)")
+                continue
+
             prepare(directory, atoms, VARIANTS[vname], args.li_potcar)
             print(f"{directory}  {atoms.get_chemical_formula()}  n={len(atoms)}")
 

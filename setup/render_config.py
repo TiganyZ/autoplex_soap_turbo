@@ -23,9 +23,18 @@ from pathlib import Path
 ROLES = ("vasp", "aims", "turbogap", "gapfit")
 
 #: Resources a role asks for when the workflow does not override them.
+#:
+#: A fallback, not a recommendation: a workflow that cares should set its own,
+#: and one whose structures vary in size should set ``resource_tiers`` so each
+#: calculation is sized to what it is calculating.
+#:
+#: FHI-aims takes a whole node, because that is the unit it is worth running on
+#: for anything but the smallest cluster -- Roihu nodes are 384 cores and 762 GB
+#: -- and a system around 200 atoms wants two, which means the `medium`
+#: partition since `small` is single-node.
 DEFAULT_RESOURCES = {
     "vasp": {"nodes": 1, "ntasks_per_node": 128, "time": "02:00:00"},
-    "aims": {"nodes": 1, "ntasks_per_node": 128, "time": "01:00:00"},
+    "aims": {"nodes": 1, "ntasks_per_node": 384, "time": "01:00:00"},
     "turbogap": {"nodes": 1, "ntasks_per_node": 64, "time": "04:00:00"},
     "gapfit": {"nodes": 1, "cpus_per_task": 48, "time": "1-00:00:00"},
 }
@@ -253,8 +262,29 @@ def render_project(config: dict, exec_configs: str) -> str:
         "# config/exec_configs.yaml. Do not edit: every setup run rewrites it.",
         f"name: {project}",
         "log_level: info",
-        "workers:",
     ]
+
+    # Where jobflow-remote stages files downloaded from the workers.
+    #
+    # It defaults to a `tmp/` folder under ~/.jfremote, which on an Aalto
+    # workstation is the home volume -- and that volume has a *file* quota of
+    # 1,000,000 inodes, already spent, while `df` still reports hundreds of
+    # gigabytes free. Every completed calculation then fails to come back with
+    #
+    #     OSError: [Errno 122] Disk quota exceeded:
+    #     '.jfremote/autoplex/tmp/download/...'
+    #
+    # after the DFT has already run: the job reaches TERMINATED on the worker,
+    # the runner retries three times, and the whole flow stalls in REMOTE_ERROR
+    # with its results sitting intact on the cluster. Same reason `work_dir` is
+    # on local disk; this is the one path that was left behind.
+    runner = next(
+        (m for m in config["machines"] if is_runner(m)), None
+    )
+    if runner is not None:
+        lines.append(f"tmp_dir: {runner['work_dir']}/jfremote_tmp")
+
+    lines.append("workers:")
 
     for machine in config["machines"]:
         # A general-purpose worker on every machine, so light jobs (data

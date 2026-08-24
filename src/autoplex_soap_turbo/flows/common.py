@@ -13,12 +13,29 @@ from autoplex_soap_turbo.payload import frames_from_payload
 logger = logging.getLogger(__name__)
 
 
-def apply_worker(target, settings: WorkerSettings | None):
+def apply_worker(target, settings: WorkerSettings | None, propagate: bool = True):
     """Pin a job or flow to a worker, exec_config and resource request.
 
     jobflow-remote reads these from ``manager_config``. Setting them on the flow
     object rather than at submission time is what lets different stages of one
     flow run on different clusters.
+
+    ``propagate`` is about what a *dynamic* job hands to the jobs it generates.
+    Normally everything should travel: the batch job is a stand-in for the
+    calculations it will create, and they belong on the same worker with the
+    same request.
+
+    Set it false when the generated jobs size themselves -- then this job must
+    hand on **nothing**, and each generated job must set its own complete
+    ``manager_config``, worker included. Not because passing part of it is
+    untidy, but because jobflow has two separate mechanisms here and both
+    *replace* a generated job's ``manager_config`` rather than merging into it:
+    ``config_updates`` is applied first, then ``pass_manager_config`` overwrites
+    whatever that produced. A child that set its own resources has them
+    discarded twice over, and the run comes back sized like its dispatcher --
+    which is what happened: eighteen FHI-aims calculations, from 10 to 40 atoms,
+    every one of them submitted on the single core the dispatcher had asked for
+    itself.
     """
     if settings is None:
         return target
@@ -31,8 +48,19 @@ def apply_worker(target, settings: WorkerSettings | None):
     if settings.resources:
         manager["resources"] = dict(settings.resources)
 
-    if manager:
+    if not manager:
+        return target
+
+    if propagate:
+        # Sets this job's own config and appends to config_updates in one call.
         target.update_config({"manager_config": manager}, dynamic=True)
+        return target
+
+    # This job's own config, and nothing inherited. `pass_manager_config` is on
+    # by default and would otherwise copy this request onto every job the
+    # dispatcher creates.
+    target.update_config({"manager_config": manager}, dynamic=False)
+    target.config.pass_manager_config = False
     return target
 
 

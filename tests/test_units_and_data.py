@@ -269,3 +269,86 @@ def test_non_numeric_info_is_left_alone_by_the_round_trip():
     assert restored.info["config_types"] == ["dimer", "monomer"]
     assert restored.info["label"] == "water"
     assert restored.info["count"] == 3
+
+
+# --------------------------------------------------------------------------
+# QUIP cannot read a multi-column string property, and says so by aborting.
+#
+# turboGAP writes fix_atoms as three columns of "T"/"F" per atom. gap_fit then
+# dies with
+#
+#     libAtoms/xyz.c line 972 kind IO
+#     String property fix_atoms with ncols != 1 no longer supported
+#
+# The trap is when it appears: iteration 0 fits the seed data, which never went
+# through turboGAP, so the first fit is clean and the failure lands one whole
+# iteration after the sampling that caused it.
+
+
+def _sampled_frame():
+    import numpy as np
+    from ase import Atoms
+
+    atoms = Atoms("H2O", positions=[[0, 0, 0], [0.96, 0, 0], [0, 0.96, 0]],
+                  cell=[20, 20, 20], pbc=True)
+    atoms.set_array("fix_atoms", np.array([["F", "F", "F"]] * 3))
+    atoms.set_array("velocities", np.zeros((3, 3)))
+    return atoms
+
+
+def test_a_multi_column_string_array_never_reaches_the_written_dataset(tmp_path):
+    from autoplex_soap_turbo.data.dataset import read_dataset, write_dataset
+
+    path = write_dataset(tmp_path / "d.xyz", [_sampled_frame()])
+
+    assert "fix_atoms" not in read_dataset(path)[0].arrays
+
+
+def test_numeric_arrays_of_several_columns_are_kept(tmp_path):
+    """Only *string* properties hit the reader limit. Forces are 3 columns of
+    floats and must survive."""
+    import numpy as np
+    from ase import Atoms
+
+    from autoplex_soap_turbo.data.dataset import read_dataset, write_dataset
+
+    atoms = Atoms("H2", positions=[[0, 0, 0], [0.74, 0, 0]],
+                  cell=[20, 20, 20], pbc=True)
+    atoms.set_array("REF_forces", np.array([[0.1, 0.2, 0.3], [-0.1, -0.2, -0.3]]))
+    path = write_dataset(tmp_path / "d.xyz", [atoms])
+
+    assert "REF_forces" in read_dataset(path)[0].arrays
+
+
+def test_the_sampler_strips_turbogap_bookkeeping_at_source(tmp_path):
+    """The dataset guard is the last line of defence; the frames should not be
+    carrying these around in the first place."""
+    from autoplex_soap_turbo.turbogap.md import strip_model_outputs
+
+    frame = _sampled_frame()
+    strip_model_outputs(frame, method="turbogap_md", non_periodic=True)
+
+    assert "fix_atoms" not in frame.arrays
+    assert "velocities" not in frame.arrays
+
+
+def test_dropping_reports_what_it_dropped():
+    """Silently changing the data would make this invisible twice."""
+    from autoplex_soap_turbo.data.dataset import drop_unreadable_arrays
+
+    dropped = drop_unreadable_arrays([_sampled_frame(), _sampled_frame()])
+
+    assert dropped == {"fix_atoms": 2}
+
+
+def test_the_file_gap_fit_reads_is_guarded_too(tmp_path):
+    """write_dataset is not the path the fit uses -- write_frames is, and it
+    wrote straight through ase.io.write. Guarding only the other one left the
+    single file that actually reaches gap_fit unprotected."""
+    from ase.io import read
+
+    from autoplex_soap_turbo.fitting.dipole_gap import write_frames
+
+    path = write_frames(tmp_path / "train.xyz", [_sampled_frame()])
+
+    assert "fix_atoms" not in read(path).arrays

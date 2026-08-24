@@ -191,3 +191,60 @@ def test_the_energy_scoring_finds_what_quip_actually_wrote(fitted):
     # Forces were fitted and predicted, so they must have been scored too.
     assert errors["n_force_components"] == 144
     assert np.isfinite(errors["rmse_forces"])
+
+
+def test_the_launch_is_a_bare_process_without_mpi_ranks(tmp_path, monkeypatch):
+    """A plain build must not be handed to srun."""
+    import autoplex_soap_turbo.fitting.dipole_gap as dg
+
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        (tmp_path / "x.xml").write_text("<GAP_params/>")
+        class R: returncode = 0
+        return R()
+
+    monkeypatch.setattr(dg.subprocess, "run", fake_run)
+    dg.run_gap_fit(["gp_file=x.xml"], num_processes=48, workdir=tmp_path)
+
+    assert seen["command"][0] == "gap_fit"
+    assert "srun" not in seen["command"]
+
+
+def test_mpi_ranks_launches_under_srun_with_threads_each(tmp_path, monkeypatch):
+    """ranks x threads should be the cores the job was allocated."""
+    import autoplex_soap_turbo.fitting.dipole_gap as dg
+
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        (tmp_path / "x.xml").write_text("<GAP_params/>")
+        class R: returncode = 0
+        return R()
+
+    monkeypatch.setattr(dg.subprocess, "run", fake_run)
+    dg.run_gap_fit(
+        ["gp_file=x.xml"], num_processes=6, workdir=tmp_path, mpi_ranks=8
+    )
+
+    assert seen["command"][:5] == ["srun", "-n", "8", "-c", "6"]
+    assert "gap_fit" in seen["command"]
+
+
+def test_one_rank_is_not_worth_an_srun(tmp_path, monkeypatch):
+    import autoplex_soap_turbo.fitting.dipole_gap as dg
+
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        (tmp_path / "x.xml").write_text("<GAP_params/>")
+        class R: returncode = 0
+        return R()
+
+    monkeypatch.setattr(dg.subprocess, "run", fake_run)
+    dg.run_gap_fit(["gp_file=x.xml"], num_processes=48, workdir=tmp_path, mpi_ranks=1)
+
+    assert "srun" not in seen["command"]

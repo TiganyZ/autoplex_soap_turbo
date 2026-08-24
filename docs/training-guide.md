@@ -172,6 +172,35 @@ jf admin reset          # first time only: initialises the database
 jf runner start
 ```
 
+### Every time you change the code, push it everywhere
+
+```bash
+bash setup/setup_all_machines.sh --sync-only
+```
+
+This is not optional and it is not only for the first install. **Each machine
+has its own copy of the repository**, and a job imports from the copy on the
+machine it runs on — not from the one you submitted from. `setup_all_machines.sh
+--sync-only` rsyncs the working tree to all of them and touches nothing else.
+
+Sync only the runner and the flow builds correctly, submits correctly, and then
+fails on the first stage that reaches another cluster:
+
+```
+File ".../autoplex_soap_turbo/aims/jobs.py", line 93, in from_dict
+    return cls(**data)
+TypeError: AimsDipoleSettings.__init__() got an unexpected keyword argument
+'resource_tiers'
+```
+
+The submitting machine had the new field; the machine running the calculation
+had a copy from before it existed. It is loud when it happens, but it happens on
+a worker, after a queue wait, and the traceback points at a line that looks
+correct in your editor.
+
+`jf job rerun -did <id>` re-queues the failed job once the sync is done; nothing
+upstream of it has to be repeated.
+
 ---
 
 ## 3. Configuring your system: LiF
@@ -412,6 +441,93 @@ same size.
 energies, so those need to be right — which is one reason the RSS config runs
 isolated atoms. Note that if the driving potential was fitted with `e0 = 0`, as
 the LiF one was, μ is effectively an absolute energy.
+
+### Sampling: a ladder of growing clusters
+
+`method: cluster_ladder` is for a different problem from the two above. It is
+not "explore this system"; it is "build up to a system one piece at a time".
+
+Consider fitting a dipole model for a molecular liquid — ethanol, say. The
+dipole of a litre of ethanol is not the sum of the dipoles of the molecules in
+it. Hydrogen bonding polarises each molecule, and that intermolecular
+contribution is most of what makes an infrared spectrum look the way it does.
+So a model has to see it. But there are two bad ways to arrange that:
+
+- **Fit only monomers.** The model learns one molecule's response perfectly and
+  has never met the intermolecular part at all. Asked about a liquid, it
+  extrapolates, and nothing in its own error estimate says so.
+- **Fit only large clusters.** Now the model has to learn the molecule's own
+  response *and* its environment's effect at once, from the most expensive
+  configurations available and the ones whose DFT is least likely to converge.
+
+The ladder is the third option: start at one molecule, grow, and carry the
+earlier rungs' data forward. By the time the model reaches twenty molecules it
+already knows what one molecule does, so the twenty-molecule frames are only
+teaching it the part that is new.
+
+```yaml
+sampling:
+  method: cluster_ladder
+  molecule_file: ethanol.xyz          # the only system-specific input
+  cluster_ladder: [1, 2, 4, 8, 12, 16, 20]   # molecules, one rung per iteration
+  cluster_density: 0.0103             # molecules/A^3 -- liquid ethanol
+  cluster_padding: 8.0                # vacuum to the cell edge, in Angstrom
+  cluster_min_separation: 1.6         # between *different* molecules
+  energy_potential: /path/to/CHO.gap  # drives the MD; never refitted
+  md:
+    md_nsteps: 4000
+    t_beg: 300.0
+```
+
+Each iteration builds a cluster at its rung — copies of `molecule_file` at
+random orientations and positions, rejected and re-drawn if any two molecules
+come closer than `cluster_min_separation` — and runs turboGAP MD from it. The
+rung is `cluster_ladder[iteration]`, held at the top once the ladder runs out,
+so a ten-iteration run with seven rungs spends its last four at twenty
+molecules.
+
+Four things worth knowing:
+
+**The rung depends on the iteration number and nothing else.** Not on what
+previous iterations produced. That is what makes a re-run iteration sample the
+same size as the one whose data it is replacing.
+
+**The cell is derived, never configured.** `dataset.box` is what you use when
+every configuration is the same size; here they span 9 to 180 atoms, and one box
+would be too small for the largest or mostly vacuum for the smallest. The cell
+is the cluster's own extent plus `cluster_padding` on each side, cubic so that
+the polarizability is a property of the same shape of box every time. Set
+`cluster_padding` above the descriptor cutoff — comfortably above, since an atom
+that sees a periodic image of its own cluster is not in the isolated
+configuration the frame is labelled as, and nothing downstream checks.
+
+**`selection.min_separation` is about the molecule, not the packing.** It is
+applied to the *whole* frame, so it has to sit below the shortest bond the
+molecule contains. Ethanol's is the 0.97 Å O–H, so `0.85` is right and the LiF
+workflow's `1.2` would discard every frame. `cluster_min_separation` is the
+separate, larger threshold that applies between molecules during packing.
+
+**The dipole model's cutoff is not the energy model's.** When a frozen
+potential drives the sampling, it is tempting to give the dipole model the same
+descriptor — turboGAP then builds one neighbour list for both instead of two.
+That is the right default for everything except the cutoff. Energies and forces
+are dominated by the near field; a dipole in a hydrogen-bonded liquid is not,
+and its intermolecular part is most of what an infrared spectrum is made of. The
+ethanol workflow uses 5.0 Å against the energy model's 4.0 Å for exactly this
+reason, and pays for it in neighbour-list work.
+
+**The test set is built at the top of the ladder.** `validation.sampling`
+overrides the training sampler key by key, and the ethanol workflow sets
+`cluster_ladder: [20]` there. This is deliberate: a model that reproduces
+monomers and fails on twenty-molecule clusters has not learned what the protocol
+exists to teach it, and a test set of monomers would score that as success.
+
+Nothing in the protocol is specific to ethanol. Point `molecule_file` at a
+different xyz, set `species_list` and `energy_potential` to match, and the same
+code trains water, methanol, or anything else that is a molecular liquid. See
+`workflows/ethanol/` for a complete worked configuration.
+
+---
 
 ---
 
@@ -766,6 +882,68 @@ It applies to the **energy fit only** — not the dipole fit, which trains on th
 whole seed dataset from iteration 0, and not the RSS path. Grand-canonical
 sampling makes it matter more, because the composition varies frame to frame, so
 the rarest species changes.
+
+---
+
+### Sizing the requests: what the job uses, not what seems generous
+
+On a busy cluster the queue wait usually dominates the compute, and a request
+sized by what looks safe rather than by what the job measurably uses converts
+straight into wall-clock delay. Three cases from one day of running these
+workflows, all the same mistake:
+
+| request | measured need | what it cost |
+|---|---|---|
+| `gap_fit`, 48 CPUs | 5.5 core-equivalents; 6 s against a 7 s baseline | 1 h 39 m at `PD (Resources)` for a job that runs in seconds |
+| FHI-aims DFPT, 384 cores × 20 h | **5 min 30 s** (180-atom ethanol, measured) | ~10 h at `PD (Priority)`; a full node for 20 h backfills into nothing |
+| an orphaned job from a FAILED flow | nothing — the result is never collected | 14 h on 2 nodes, blocking everything behind it |
+
+The DFPT row is the starkest: the request was two hundred times the job. Nobody
+chose that number from evidence -- it was picked to be safely large before any
+180-atom calculation had ever run -- and it turned a six-minute calculation into
+a ten-hour one. Measure one job, then size the rest.
+
+The `gap_fit` number is worth stating precisely because the intuition is
+strongly wrong. On 48 ranks a seed fit came back at 20 s wall against 111 s of
+CPU: 5.5 cores' worth of work spread over 48, so 42 ranks idle. An A/B against
+a single process was 6 s versus 7 s. At small dataset sizes the fit does not
+scale, and asking for a node's worth of cores buys only the wait.
+
+Practical rules:
+
+- **Size the fit small until a fit is slow.** Eight ranks schedules almost
+  immediately; revisit when a later iteration's fit takes minutes rather than
+  seconds, because by then the dataset is large enough for the ranks to have
+  work.
+- **Prefer several small requests to one large one**, unless the calculation
+  genuinely needs the memory or the parallelism. Per-structure resource tiers
+  exist for this: see `AimsSettings.resource_tiers`.
+- **A long walltime is not free either.** It is the safe side of one real trade
+  — retries happen *inside* one allocation, so a job that runs out of time is
+  reported unconverged and dropped rather than resumed — but a 20-hour request
+  backfills far worse than a 2-hour one. Set it from a measured runtime as soon
+  as you have one.
+- **Request memory explicitly.** Slurm's default here is 1 GB per CPU, and two
+  ethanol jobs were OOM-killed by it: the FHI-aims *dispatcher*, which asks for
+  one core and so got 1 GB while importing jobflow, pymatgen and ASE around a
+  frames payload; and a 16-rank turboGAP sampling job, which got 16 GB and
+  needed more. The second is the counter-intuitive one -- turboGAP's memory
+  scales *with* ranks rather than being divided among them, because each rank
+  loads its own copy of the potential (107 MB on disk for the CHO GAP, with
+  34 MB and 42 MB sparse arrays), so adding cores adds demand as fast as it
+  adds allowance. Set `mem` on single-core jobs and `mem_per_cpu` on parallel
+  ones; both render straight into the Slurm header.
+
+- **A rerun that passes does not prove the failure was transient.** The first of
+  those two OOMs succeeded on a plain rerun, which is what led to calling it
+  node pressure. The second, an hour later, showed both had the same cause and
+  the rerun had simply been lucky. `sacct --format=ReqMem,AllocTRES` is the
+  check that settles it, and `MaxRSS` will not: a job killed inside the
+  sampling interval reports a peak of a few megabytes.
+
+- **Cancel the jobs of a flow you have deleted.** jobflow does not; the Slurm
+  job keeps running work nobody will collect. Check with
+  `squeue -u $USER` and match the `process_id` in `jf job info` against it.
 
 ---
 

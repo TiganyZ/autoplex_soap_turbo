@@ -72,6 +72,10 @@ def main() -> None:
     parser.add_argument("--box", type=float, default=REFERENCE_BOX)
     parser.add_argument("-o", "--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--keep-open-shell", action="store_true",
+                        help="keep non-stoichiometric (odd-electron) clusters. "
+                             "FHI-aims refuses them; VASP answers without "
+                             "warning and the answer is not the ground state.")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -112,13 +116,44 @@ def main() -> None:
         raise SystemExit("nothing selected")
 
     # Neutrality is what makes a dipole origin-independent. Molecular exchange
-    # of a neutral LiF unit is what guarantees it here, so this asserts the
-    # thing that guarantee was for.
+    # of a neutral LiF unit is what guarantees it here, so this checks the thing
+    # that guarantee was for -- and then goes one step further.
+    #
+    # A charge-neutral cluster can still be an open-shell radical. Li_n F_m
+    # carries 3n + 9m = 3(n + 3m) electrons, whose parity follows n + m, so any
+    # non-stoichiometric cluster has an odd atom count and an unpaired electron.
+    # Those are dropped, for two reasons:
+    #
+    #   FHI-aims will not compute them as closed-shell molecules at all -- it
+    #   raises "Charge of 0 and spin multiplicity of 1 is not possible" -- so
+    #   they cannot be part of a reference set shared between the two codes.
+    #
+    #   VASP *will* compute them. It fills the half-occupied level with a
+    #   fractional occupation and finishes, reporting a dipole and a
+    #   polarizability that are not the ground state, with nothing in the output
+    #   saying so. That is the more dangerous of the two.
+    #
+    # And they are unnecessary either way: a grand-canonical walk exchanging
+    # whole neutral LiF units only ever produces stoichiometric clusters, so a
+    # radical is a regime the model will never be asked about. Fitting one
+    # dipole model across both asks it to learn two different things.
+    kept, radicals = [], []
     for frame in selected:
-        counts = collections.Counter(frame.get_chemical_symbols())
-        if counts["Li"] != counts["F"]:
-            print(f"  note: {frame.get_chemical_formula()} is non-stoichiometric "
-                  "(still charge-neutral, so the dipole is well defined)")
+        electrons = int(sum(frame.get_atomic_numbers()))
+        (radicals if electrons % 2 else kept).append(frame)
+
+    if radicals:
+        formulas = ", ".join(sorted(f.get_chemical_formula() for f in radicals))
+        if args.keep_open_shell:
+            print(f"  WARNING: keeping {len(radicals)} open-shell frame(s): {formulas}. "
+                  "FHI-aims will refuse these; VASP will answer without warning "
+                  "and the answer will not be the ground state.")
+        else:
+            print(f"  dropped {len(radicals)} open-shell frame(s): {formulas}")
+            selected = kept
+
+    if not selected:
+        raise SystemExit("everything was dropped as open-shell")
 
     write(args.out, selected)
     sizes = collections.Counter(len(a) for a in selected)
