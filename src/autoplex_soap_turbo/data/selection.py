@@ -376,3 +376,78 @@ def select_novel(
         len(accepted), len(candidates), min_distance, calibration,
     )
     return [candidates[i] for i in accepted], report
+
+
+def largest_fragment_gap(atoms) -> float:
+    """The widest gap that has to be bridged to keep a structure connected.
+
+    Formally the largest edge in the minimum spanning tree of the atoms. If it
+    is small the structure is one connected object; if it is large, part of the
+    structure has detached and sits that far from everything else.
+
+    Deliberately computed on atoms rather than on molecules, so it needs no
+    notion of what a molecule is and works for any system.
+
+    This detects the opposite failure from :func:`shortest_separation`. That one
+    catches a sampler with no repulsion, whose atoms collapse together. This one
+    catches a cluster boiling: a molecule evaporating from a finite cluster in
+    vacuum, which is what an MD of a weakly bound cluster does at 300 K given
+    enough time.
+    """
+    n = len(atoms)
+    if n < 2:
+        return 0.0
+    distances = atoms.get_all_distances(mic=bool(np.any(atoms.pbc)))
+
+    # Prim's algorithm. The largest edge added is the answer; n is a couple of
+    # hundred atoms here, so the O(n^2) form is far cheaper than building a
+    # graph library's data structures.
+    inside = np.zeros(n, dtype=bool)
+    inside[0] = True
+    best = distances[0].copy()
+    best[0] = np.inf
+    widest = 0.0
+    for _ in range(n - 1):
+        nxt = int(np.argmin(best))
+        widest = max(widest, float(best[nxt]))
+        inside[nxt] = True
+        best = np.minimum(best, distances[nxt])
+        best[inside] = np.inf
+    return widest
+
+
+def drop_fragmented(
+    candidates, max_gap: float | None = None
+) -> tuple[list, list[float]]:
+    """Discard structures that have come apart into separated pieces.
+
+    ``max_gap`` should be about the descriptor cutoff, and that is the whole
+    argument for the filter. A fragment further away than the cutoff is
+    *invisible* to the model -- no descriptor centred on the rest of the
+    structure can see it -- yet it still contributes to the total dipole, and in
+    DFT it contributes disproportionately: a detached neutral fragment picks up
+    a spurious fractional charge from the exchange-correlation functional's
+    delocalisation error, and the resulting dipole grows with the separation.
+
+    So these frames carry a target the model is structurally incapable of
+    predicting. Two of them, out of thirty-eight, held half the variance of an
+    ethanol validation set and pinned its model at no better than predicting
+    zero for four iterations.
+    """
+    if not max_gap:
+        return list(candidates), []
+    kept, rejected = [], []
+    for atoms in candidates:
+        gap = largest_fragment_gap(atoms)
+        if gap > max_gap:
+            rejected.append(gap)
+        else:
+            kept.append(atoms)
+    if rejected:
+        logger.warning(
+            "dropped %d of %d candidate(s) that had fragmented, with pieces up "
+            "to %.1f A from the rest (limit %.1f A). A cluster in vacuum "
+            "evaporates if the dynamics run long enough or warm enough.",
+            len(rejected), len(candidates), max(rejected), max_gap,
+        )
+    return kept, rejected

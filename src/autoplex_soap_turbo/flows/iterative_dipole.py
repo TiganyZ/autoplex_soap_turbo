@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from jobflow import Flow, Response, job
+from jobflow import Flow, JobConfig, OutputReference, Response, job
 
 from autoplex_soap_turbo.config import ConfigError, TrainingConfig
 from autoplex_soap_turbo.data.dataset import (
@@ -43,6 +43,7 @@ from autoplex_soap_turbo.data.dataset import (
 )
 from autoplex_soap_turbo.data.selection import (
     drop_collapsed,
+    drop_fragmented,
     select_diverse,
     shortest_separation,
 )
@@ -657,6 +658,22 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
             "kept its core_pot descriptors."
         )
 
+    # Then integrity. The mirror of the collapse check above: that one catches
+    # a sampler with no short-range repulsion, this one catches a finite cluster
+    # boiling. Farthest-point selection prefers a fragmented frame for the same
+    # reason it prefers a collapsed one -- nothing else looks like it.
+    n_fragmented = 0
+    if selection.max_fragment_gap:
+        pool, fragmented = drop_fragmented(pool, selection.max_fragment_gap)
+        n_fragmented = len(fragmented)
+        if not pool:
+            raise ValueError(
+                f"every one of the {n_pool} candidates had fragmented, with "
+                f"pieces further than {selection.max_fragment_gap} A from the "
+                "rest. The sampling is boiling the cluster -- shorten the "
+                "dynamics, lower the temperature, or pack more densely."
+            )
+
     # Then affordability. Farthest-point selection prefers the largest cluster
     # in the pool for the same reason it prefers a collapsed one: nothing else
     # looks like it. That preference is what walked the last campaign into a
@@ -705,6 +722,9 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
         # means the walk has left the range the model is being trained on, and
         # the iteration is spending its budget on the tail of that walk.
         "n_oversized": n_oversized,
+        # A rising count here means the dynamics are evaporating the cluster,
+        # which no amount of extra sampling fixes.
+        "n_fragmented": n_fragmented,
         "shortest_separation": (
             round(min(shortest_separation(a) for a in chosen), 4) if chosen else None
         ),
@@ -972,9 +992,55 @@ def _fit_digest(result: dict | None, energy: bool = False) -> dict | None:
     return {key: result.get(key) for key in keys if key in result}
 
 
+# ``expose_store`` is what puts the store on ``CURRENT_JOB``; without it this
+# job has no way to reach the thing it exists to read.
+@job(data=["frames", "potential"], config=JobConfig(expose_store=True))
+def load_stored_output(uuid: str) -> dict:
+    """Read a previous job's output back out of the job store.
+
+    The gate builds the next iteration, and those jobs need the dataset and the
+    validation set. There is no way to hand either of them over directly:
+
+    * By value is what overflowed the job document -- the jobs a gate builds are
+      serialised into the gate's own output, so a dataset passed by value is
+      written once per job.
+    * By ``OutputReference`` is refused. jobflow-remote calls
+      :func:`jobflow.core.flow.get_flow` on the replacement with
+      ``allow_external_references=False`` hard-coded, and every job the gate
+      needs lives *outside* the replacement flow, so the references cannot be
+      resolved within it.
+
+    What is left is a uuid, which is a string and so neither large nor a
+    reference. The replacement flow begins by reading the output back itself,
+    and everything downstream references *this* job -- which is inside the flow,
+    and so resolves. The ``data`` keys keep the two payloads that actually have
+    size -- the frames and the fitted potential -- out of this job's own
+    document on the way back through; without them the loader would simply move
+    the overflow one job downstream.
+    """
+    from jobflow import CURRENT_JOB
+
+    output = CURRENT_JOB.store.get_output(uuid, load=True)
+    if output is None:
+        raise ValueError(
+            f"no output stored for job {uuid}. The gate was given the uuid of a "
+            "job that has not stored a result, so the iteration it is building "
+            "has nothing to work from."
+        )
+    n_frames = output.get("frames") if isinstance(output, dict) else None
+    if isinstance(n_frames, dict):
+        logger.info(
+            "loaded %s: %d train / %d test frames",
+            uuid,
+            len(n_frames.get("train") or []),
+            len(n_frames.get("test") or []),
+        )
+    return output
+
+
 @job(data="frames")
 def convergence_gate(
-    dataset: dict,
+    dataset_ref: str | dict,
     test_set: dict,
     fit_result: dict,
     validation_result: dict,
@@ -982,6 +1048,9 @@ def convergence_gate(
     iteration: int,
     history: list[dict],
     energy_fit_result: dict | None = None,
+    test_set_uuid: str | None = None,
+    fit_uuid: str | None = None,
+    energy_fit_uuid: str | None = None,
 ) -> Response:
     """Stop the run, or build the next iteration.
 
@@ -995,8 +1064,14 @@ def convergence_gate(
     Building the *rest* of the iteration here rather than before the gate is
     deliberate: a converged model should not have already spent a DFT batch
     generating data for an iteration that will not happen.
+
+    ``dataset_ref`` arrives as the uuid of the job holding the dataset, not as
+    the dataset -- see :func:`_dataset_uuid` for why. The gate never reads the
+    frames; it only hands them to the jobs it builds, so it has no reason to
+    make jobflow fetch them.
     """
     settings = TrainingConfig(**_rehydrate(config))
+
     validation = settings.validation
 
     errors = validation_result.get("errors") or {}
@@ -1089,6 +1164,20 @@ def convergence_gate(
         validation.max_iterations,
     )
 
+    # Read the dataset back inside the replacement flow, so the jobs below
+    # reference a job that is part of it. See :func:`load_stored_output`.
+    # Gates queued by an earlier version were given the dataset by value; accept
+    # that too, so a run already in flight finishes rather than failing at the
+    # first gate it reaches after an upgrade.
+    head = []
+    if isinstance(dataset_ref, str):
+        dataset_job = load_stored_output(dataset_ref)
+        dataset_job.name = f"{settings.name}: dataset {iteration}"
+        dataset = dataset_job.output
+        head.append(dataset_job)
+    else:
+        dataset = dataset_ref
+
     sample = sample_candidates(
         dataset, fit_result, config, iteration, energy_fit_result=energy_fit_result
     )
@@ -1103,13 +1192,32 @@ def convergence_gate(
     merge = merge_dataset(dataset, reference.output, config, iteration)
     merge.name = f"{settings.name}: merge {iteration}"
 
+    # The validation frames are the same problem as the dataset, and get the
+    # same answer: the gate reads them (it reports on them above), and the
+    # iteration it builds reads them again from the store. The *original* uuid
+    # is what travels onward, not this flow's copy of it, so the chain of
+    # loaders stays one deep however many iterations run.
+    if test_set_uuid:
+        test_set_job = load_stored_output(test_set_uuid)
+        test_set_job.name = f"{settings.name}: validation set {iteration + 1}"
+        head.append(test_set_job)
+        next_test_set = test_set_job.output
+    else:
+        next_test_set = test_set
+
     following = _iteration_flow(
-        merge.output, test_set, settings, config, iteration + 1, history
+        merge.output,
+        next_test_set,
+        settings,
+        config,
+        iteration + 1,
+        history,
+        test_set_uuid=test_set_uuid,
     )
 
     return Response(
         replace=Flow(
-            [sample, select, reference, merge, following],
+            [*head, sample, select, reference, merge, following],
             output=following.output,
             name=f"{settings.name}: iteration {iteration + 1}",
         )
@@ -1495,6 +1603,43 @@ def _refuse_open_shell_seed(frames, settings: TrainingConfig) -> None:
     )
 
 
+def _dataset_uuid(dataset_ref) -> str:
+    """The uuid behind a dataset reference, for handing across a gate.
+
+    A gate is a job, so every ``OutputReference`` in its arguments is resolved
+    before its body runs -- and the dataset resolves to every training and test
+    frame the run has accumulated. That is fine to hold in memory, and fatal to
+    pass on: the jobs the gate builds are serialised into its *output* document,
+    arguments and all, so a dataset handed to them by value is written into the
+    store once per job. At 180 atoms with forces, iteration 0 of the ethanol run
+    reached 30 MB against MongoDB's 16 MB document limit, and the write failed
+    in a way that left the job recorded as finished with no output at all --
+    neither completable nor rerunnable.
+
+    Passing the uuid instead keeps the argument a 36-character string. The gate
+    rebuilds the reference for the jobs it creates, and jobflow resolves it on
+    the worker that actually needs the frames, which is where the resolution
+    belonged in the first place.
+    """
+    if isinstance(dataset_ref, str):
+        return dataset_ref
+    if not isinstance(dataset_ref, OutputReference):
+        raise TypeError(
+            "the dataset must reach a gate as an OutputReference or a uuid, "
+            f"not as {type(dataset_ref).__name__}. Passing it by value is what "
+            "overflows the job document."
+        )
+    if dataset_ref.attributes:
+        # Reconstructing the reference from a bare uuid would silently drop the
+        # attribute path and hand the next job the whole output instead of the
+        # part that was asked for.
+        raise ValueError(
+            f"cannot pass {dataset_ref} through a gate by uuid: it selects "
+            "an attribute, and only the uuid survives the trip."
+        )
+    return dataset_ref.uuid
+
+
 def _gated_training(prepare, jobs: list, settings: TrainingConfig, config: dict) -> Flow:
     """The convergence-gated shape of the run.
 
@@ -1515,7 +1660,12 @@ def _gated_training(prepare, jobs: list, settings: TrainingConfig, config: dict)
     test_jobs, test_set = _test_set_stage(prepare.output, settings, config)
     jobs.extend(test_jobs)
 
-    first = _iteration_flow(prepare.output, test_set, settings, config, 0, [])
+    first = _iteration_flow(
+        prepare.output, test_set, settings, config, 0, [],
+        test_set_uuid=(
+            _dataset_uuid(test_set) if isinstance(test_set, OutputReference) else None
+        ),
+    )
     jobs.append(first)
 
     return Flow(jobs, output=first.output, name=settings.name)
@@ -1528,6 +1678,7 @@ def _iteration_flow(
     config: dict,
     iteration: int,
     history: list[dict],
+    test_set_uuid: str | None = None,
 ) -> Flow:
     """One gated iteration: fit, score against the fixed set, then decide.
 
@@ -1565,7 +1716,10 @@ def _iteration_flow(
     jobs.append(evaluate)
 
     gate = convergence_gate(
-        dataset_ref,
+        # By uuid, not by value: the gate only forwards the dataset, and
+        # resolving it here would write every frame into the gate's own
+        # document. See _dataset_uuid.
+        _dataset_uuid(dataset_ref),
         test_set,
         fit.output,
         evaluate.output,
@@ -1573,6 +1727,10 @@ def _iteration_flow(
         iteration,
         history,
         energy_fit_result=energy_fit_output,
+        # The uuid of the job that *originally* produced the validation set, so
+        # each iteration reads it from the same place rather than from the
+        # previous iteration's copy of it.
+        test_set_uuid=test_set_uuid,
     )
     gate.name = f"{settings.name}: check {iteration}"
     jobs.append(gate)

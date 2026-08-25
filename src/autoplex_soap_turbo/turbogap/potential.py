@@ -46,6 +46,13 @@ _PATH_KEYS = (
     # keeps pointing at the directory it was converted in and turboGAP dies in
     # Fortran with a backtrace and no file name.
     "core_pot_file",
+    # A local property -- Hirshfeld volumes, for Tkatchenko-Scheffler
+    # dispersion -- is a second GP inside the same soap_turbo block, with its
+    # own sparse set and its own alphas. Missing from this list, an adopted
+    # potential loads its energy model from the new subdirectory and then looks
+    # for its Hirshfeld files where the ORIGINAL lived, so a potential that has
+    # been moved works for everything except the term the move was made for.
+    "local_property_qs", "local_property_alphas",
 )
 
 
@@ -168,8 +175,11 @@ def _rewrite_paths(potential: Path, prefix: str) -> None:
 
     def replace(match: re.Match) -> str:
         key, path = match.group("key"), match.group("path")
-        basename = path.rsplit("/", 1)[-1]
-        return f'{key} = "{prefix}{basename}"'
+        # A local-property key holds one path per property, space-separated
+        # inside the one pair of quotes, so this rewrites each of them.
+        rewritten = " ".join(prefix + part.rsplit("/", 1)[-1]
+                             for part in path.split())
+        return f'{key} = "{rewritten}"'
 
     pattern = re.compile(
         r'(?P<key>' + "|".join(_PATH_KEYS) + r')\s*=\s*"(?P<path>[^"]+)"'
@@ -249,10 +259,6 @@ def build_md_potential(
     what the turboGAP ``input`` needs), ``isolated_atom_energies`` from the
     energy model, and ``n_dipole_blocks``.
     """
-    from autoplex.fitting.common.turbogap import (  # noqa: PLC0415
-        extract_isolated_atom_energies,
-    )
-
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -268,6 +274,14 @@ def build_md_potential(
         dropped: list[str] = []
         isolated_atom_energies = {}
     else:
+        # Only the conversion path needs autoplex, and only for the e0 values a
+        # GAP XML carries. Importing it at the top of the function makes an
+        # already-converted potential -- which needs neither -- depend on a
+        # fitting stack that a compute node running MD has no reason to have.
+        from autoplex.fitting.common.turbogap import (  # noqa: PLC0415
+            extract_isolated_atom_energies,
+        )
+
         energy_potential, dropped = convert_potential(
             energy_gap, species_list, run_dir, "energy"
         )
@@ -279,9 +293,17 @@ def build_md_potential(
         dipole_gap = Path(dipole_gap)
         if not dipole_gap.is_file():
             raise FileNotFoundError(f"no dipole potential at {dipole_gap}")
-        dipole_potential, _ = convert_potential(
-            dipole_gap, species_list, run_dir, "dipole"
-        )
+        if is_turbogap_format(dipole_gap):
+            # Same reasoning as the energy branch: a potential that has already
+            # been converted is complete, and reconverting its XML would lose
+            # whatever the converter cannot represent. A dipole GAP fitted
+            # through this repo also arrives already flagged, and
+            # mark_as_dipole_model is a no-op in that case.
+            dipole_potential = adopt_turbogap_potential(dipole_gap, run_dir, "dipole")
+        else:
+            dipole_potential, _ = convert_potential(
+                dipole_gap, species_list, run_dir, "dipole"
+            )
         n_dipole_blocks = mark_as_dipole_model(dipole_potential)
         converted.append(dipole_potential)
 

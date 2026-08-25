@@ -102,7 +102,7 @@ sampling:
   worker: roihu_cpu_turbogap
 
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 8
@@ -240,7 +240,7 @@ aims:
   # environment, but the resources are not, or the tiers below would never take
   # effect.
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 1
@@ -250,7 +250,7 @@ aims:
     # Most of the seed batch, and the small end of every walk.
     - max_atoms: 24
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 32
@@ -258,7 +258,7 @@ aims:
 
     - max_atoms: 48
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 64
@@ -266,7 +266,7 @@ aims:
 
     - max_atoms: 96
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 128
@@ -275,7 +275,7 @@ aims:
     # A whole node.
     - max_atoms: 150
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 384
@@ -286,7 +286,7 @@ aims:
     # is the most expensive calculation in the run.
     - max_atoms: null
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: medium
         nodes: 2
         ntasks_per_node: 384

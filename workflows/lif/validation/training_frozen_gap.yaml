@@ -51,7 +51,7 @@ sampling:
   worker: roihu_cpu_turbogap
 
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 8
@@ -179,7 +179,7 @@ vasp:
   # and exec_config are, the resources are not, or the tiers below would never
   # take effect.
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 1
@@ -188,7 +188,7 @@ vasp:
   resource_tiers:
     - max_atoms: 24
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 32
@@ -197,7 +197,7 @@ vasp:
 
     - max_atoms: 48
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 64
@@ -206,7 +206,7 @@ vasp:
 
     - max_atoms: 96
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 128
@@ -215,7 +215,7 @@ vasp:
 
     - max_atoms: 150
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 192
@@ -224,7 +224,7 @@ vasp:
 
     - max_atoms: null
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 256

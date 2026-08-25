@@ -74,7 +74,7 @@ sampling:
   # condensed-phase turboGAP work, and reserving that to displace twenty
   # structures is a long wait for a second of work.
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 4
@@ -149,7 +149,7 @@ aims:
   # The account has to be repeated: these replace the worker's resources rather
   # than being merged into them.
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 8

@@ -898,6 +898,19 @@ workflows, all the same mistake:
 | FHI-aims DFPT, 384 cores × 20 h | **5 min 30 s** (180-atom ethanol, measured) | ~10 h at `PD (Priority)`; a full node for 20 h backfills into nothing |
 | an orphaned job from a FAILED flow | nothing — the result is never collected | 14 h on 2 nodes, blocking everything behind it |
 
+The strongest single measurement, on the same 180-atom FHI-aims DFPT:
+
+```
+384 cores:  5 min 26 s,  5 min 14 s,  5 min 11 s   ->  never scheduled (10 h queued)
+128 cores:  5 min 43 s,  5 min 38 s,  5 min 37 s   ->  running within 8 min
+```
+
+Two thirds of the cores removed cost **4%** of runtime. The reason is
+atoms-per-rank: 180 atoms over 384 ranks is 0.47 atoms each, far past where
+FHI-aims stops scaling, so those 256 extra cores were doing nothing except
+making the job unschedulable. Aim for 1-3 atoms per rank and check the scaling
+before asking for more; the curve is flat long before a whole node.
+
 The DFPT row is the starkest: the request was two hundred times the job. Nobody
 chose that number from evidence -- it was picked to be safely large before any
 180-atom calculation had ever run -- and it turned a six-minute calculation into

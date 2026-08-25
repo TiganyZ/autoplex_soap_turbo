@@ -66,7 +66,7 @@ dataset:
 sampling:
   worker: roihu_cpu_turbogap
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 8
@@ -193,7 +193,7 @@ aims:
   exec_config: roihu_aims_config
 
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 1
@@ -213,7 +213,7 @@ aims:
   resource_tiers:
     - max_atoms: 12
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 16
@@ -227,7 +227,7 @@ aims:
         mem_per_cpu: 2G
     - max_atoms: 30
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 32
@@ -235,7 +235,7 @@ aims:
         mem_per_cpu: 2G
     - max_atoms: 60
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 64
@@ -243,7 +243,7 @@ aims:
         mem_per_cpu: 2G
     - max_atoms: null
       resources:
-        account: project_2017844
+        account: project_2003566
         partition: small
         nodes: 1
         ntasks_per_node: 128
@@ -307,7 +307,12 @@ fit:
     cpus_per_task: 1
     # Two hours rather than a day. This fit is small and, if it does hit the
     # limit, that is worth finding out in two hours rather than the next day.
-    time: "02:00:00"
+    # 30 minutes, not hours. Triton node maintenance is coming, and Slurm will
+    # not start a job whose walltime would run past a reservation -- so a long
+    # limit stops the job being schedulable at all as the window approaches.
+    # There is no cost to shortening it: the fit was measured at 1 min 10 s on
+    # 8 ranks, so this is still 25x margin.
+    time: "00:30:00"
   hyperparameters_file: gap_hypers.yaml
 
   mpi_ranks: 8

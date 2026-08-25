@@ -56,7 +56,7 @@ sampling:
   worker: roihu_cpu_turbogap
 
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 4
@@ -146,7 +146,7 @@ vasp:
   # The account has to be repeated: these replace the worker's resources rather
   # than being merged into them.
   resources:
-    account: project_2017844
+    account: project_2003566
     partition: small
     nodes: 1
     ntasks_per_node: 32

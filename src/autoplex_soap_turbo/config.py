@@ -476,6 +476,25 @@ class SelectionSettings:
     method: str = "fps"
     min_separation: float | None = None
 
+    #: Widest gap, in Angstrom, a structure may contain before it is treated as
+    #: having fragmented. ``None`` disables the check.
+    #:
+    #: Measured as the largest edge in the minimum spanning tree of the atoms,
+    #: so it needs no notion of what a molecule is. A cluster in vacuum
+    #: evaporates if the dynamics run long or warm enough, and a detached piece
+    #: is a configuration no model can learn: further away than the descriptor
+    #: cutoff it is invisible to every local environment, yet it still
+    #: contributes to the total dipole -- and disproportionately, because DFT
+    #: gives an isolated neutral fragment a spurious fractional charge whose
+    #: dipole grows with the separation.
+    #:
+    #: Set it well above the typical intermolecular spacing, not at the
+    #: descriptor cutoff. In a 20-molecule ethanol set the median *healthy*
+    #: frame already had a 5.1 A gap, simply because molecules at liquid
+    #: density sit that far apart; the frames that had genuinely come apart sat
+    #: at 9.7 A and beyond.
+    max_fragment_gap: float | None = None
+
     #: Largest structure that may be sent to DFT, in atoms.
     #:
     #: A grand-canonical walk grows without an upper bound, and the cost of the

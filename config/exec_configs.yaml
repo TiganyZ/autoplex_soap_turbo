@@ -56,3 +56,26 @@ roihu_vasp_config:
     module use /projappl/project_2020289/modules/modulefiles
     module load vasp/cpu/6.6.1
     ulimit -s unlimited
+
+# turboGAP with the MAD-IR feature branch: ir_fft.f90, mad_ir_xl.f90 and the
+# GLE thermostat. A SEPARATE BINARY from the one the sampling workflows use,
+# because it is built from `feature/ir` rather than from what is on master, and
+# because two workflows sharing one bin/turbogap means a rebuild for one of them
+# silently changes the other.
+#
+# TURBOGAP_BIN is a fallback: workflows/water_ir_matching names `executable`
+# explicitly, and turbogap/ir.py only consults the environment when it does not.
+# DOSPT_BIN has no such fallback -- the equilibration check reads it or PATH.
+roihu_turbogap_ir_config:
+  modules:
+    - gcc/15.2.0
+    - openmpi/5.0.10
+    - openblas/0.3.30
+  export:
+    TURBOGAP_BIN: "/projappl/project_2017844/turbogap_feature_ir/bin/turbogap"
+    DOSPT_BIN: "/projappl/project_2017844/dospt/bin/DoSPT"
+    OMP_NUM_THREADS: 1
+  pre_run: |
+    source /etc/profile
+    source ~/.bashrc
+    ulimit -s unlimited

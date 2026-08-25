@@ -46,6 +46,7 @@ from autoplex_soap_turbo.data.dataset import (
 from autoplex_soap_turbo.data.selection import (
     ABSOLUTE_MIN_SEPARATION,
     drop_collapsed,
+    drop_fragmented,
     select_novel,
     shortest_separation,
 )
@@ -131,6 +132,17 @@ def _merge(args: argparse.Namespace) -> None:
     with_target = [a for a in salvaged if args.dipole_key in a.info]
     if len(with_target) != len(salvaged):
         print(f"  dropped {len(salvaged) - len(with_target)} without a {args.dipole_key}")
+    if args.require_element:
+        wanted = set(args.require_element)
+        before = len(with_target)
+        with_target = [a for a in with_target
+                       if wanted <= set(a.get_chemical_symbols())]
+        if len(with_target) != before:
+            print(f"  dropped {before - len(with_target)} without "
+                  f"{', '.join(sorted(wanted))} "
+                  "(a species subset filter admits smaller systems: asking for "
+                  "C H O also matches water)")
+
     kept, rejected = drop_collapsed(with_target, args.min_separation)
     if rejected:
         print(
@@ -138,6 +150,14 @@ def _merge(args: argparse.Namespace) -> None:
             f"{max(args.min_separation or 0.0, ABSOLUTE_MIN_SEPARATION):.2f} A "
             f"(shortest {min(rejected):.3f} A)"
         )
+
+    if args.max_fragment_gap:
+        before = len(kept)
+        kept, fragments = drop_fragmented(kept, args.max_fragment_gap)
+        if fragments:
+            print(f"  dropped {len(fragments)} that had fragmented, with pieces "
+                  f"up to {max(fragments):.1f} A from the rest "
+                  f"(limit {args.max_fragment_gap} A)")
 
     # Duplicates *within* the salvage are removed by the same pass that
     # compares against the dataset: each accepted frame joins the reference set.
@@ -211,6 +231,15 @@ def main() -> None:
     merge.add_argument("--settings-group",
                        help="digest of the FHI-aims settings to keep, from the "
                             "table this prints; 'all' to mix them anyway")
+    merge.add_argument("--require-element", nargs="+", metavar="EL",
+                       help="keep only frames containing all of these. The "
+                            "harvest's --species is a subset test, so 'C H O' "
+                            "also admits water; this pins the chemistry.")
+    merge.add_argument("--max-fragment-gap", type=float,
+                       help="reject frames whose atoms span a gap wider than "
+                            "this, i.e. that have evaporated a piece. A "
+                            "detached fragment is invisible to the descriptor "
+                            "yet still carries dipole.")
     merge.add_argument("--min-separation", type=float, default=1.2,
                        help="reject frames with atoms closer than this")
     merge.set_defaults(func=_merge)

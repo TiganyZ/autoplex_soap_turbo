@@ -176,7 +176,7 @@ def build_cluster(
 
 def _finalise(cluster: Atoms, molecule: Atoms, n_molecules: int, padding: float) -> Atoms:
     """Put the cluster in a box derived from its own size, and label it."""
-    extent = cluster.get_positions().ptp(axis=0) if len(cluster) > 1 else np.zeros(3)
+    extent = np.ptp(cluster.get_positions(), axis=0) if len(cluster) > 1 else np.zeros(3)
     # One cubic cell rather than an orthorhombic fit to the cluster: the
     # polarizability is a property of the object *in this box*, and a cell whose
     # shape follows the cluster makes alpha vary between frames for reasons that

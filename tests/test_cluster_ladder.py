@@ -86,7 +86,7 @@ def test_the_box_leaves_the_configured_vacuum_on_every_side(n):
     cluster = build_cluster(ethanol(), n, rng=2, padding=DEFAULT_PADDING)
 
     side = cluster.get_cell()[0, 0]
-    extent = cluster.get_positions().ptp(axis=0)
+    extent = np.ptp(cluster.get_positions(), axis=0)
     assert np.all(side - extent >= 2 * DEFAULT_PADDING - 1e-6)
     # Cubic, so the polarizability is a property of the same box every time.
     assert cluster.get_cell().lengths() == pytest.approx([side, side, side])
@@ -313,4 +313,87 @@ def test_density_reaches_the_built_cluster():
     loose = build_cluster(ethanol(), 8, rng=0, number_density=0.004)
     tight = build_cluster(ethanol(), 8, rng=0, number_density=0.020)
 
-    assert tight.get_positions().ptp(axis=0).max() < loose.get_positions().ptp(axis=0).max()
+    assert np.ptp(tight.get_positions(), axis=0).max() < np.ptp(loose.get_positions(), axis=0).max()
+
+
+# --------------------------------------------------------------------------
+# Evaporation. A finite cluster in vacuum boils if the dynamics run long or
+# warm enough, and a detached fragment is a configuration no model can learn:
+# beyond the descriptor cutoff it is invisible to every local environment, yet
+# it still contributes to the total dipole.
+
+
+def _two_pieces(separation):
+    """Two 4-molecule clumps, `separation` apart."""
+    from ase import Atoms
+
+    a = build_cluster(ethanol(), 4, rng=0, number_density=0.010)
+    b = a.copy()
+    b.translate([separation, 0, 0])
+    out = Atoms(a.get_chemical_symbols() + b.get_chemical_symbols(),
+                positions=np.vstack([a.get_positions(), b.get_positions()]),
+                cell=[200, 200, 200], pbc=True)
+    return out
+
+
+def test_the_gap_is_the_widest_bridge_needed_to_stay_connected():
+    from autoplex_soap_turbo.data.clusters import build_cluster as bc
+    from autoplex_soap_turbo.data.selection import largest_fragment_gap
+
+    intact = bc(ethanol(), 8, rng=0, number_density=0.010)
+    assert largest_fragment_gap(intact) < 8.0
+
+    split = _two_pieces(40.0)
+    assert largest_fragment_gap(split) > 20.0
+
+
+def test_a_fragmented_frame_is_dropped_and_an_intact_one_is_not():
+    from autoplex_soap_turbo.data.clusters import build_cluster as bc
+    from autoplex_soap_turbo.data.selection import drop_fragmented
+
+    intact = bc(ethanol(), 8, rng=1, number_density=0.010)
+    kept, rejected = drop_fragmented([intact, _two_pieces(40.0)], max_gap=8.0)
+
+    assert len(kept) == 1
+    assert len(rejected) == 1
+    assert rejected[0] > 20.0
+
+
+def test_the_check_is_off_unless_a_threshold_is_given():
+    """Existing workflows must not start silently discarding frames."""
+    from autoplex_soap_turbo.data.selection import drop_fragmented
+
+    kept, rejected = drop_fragmented([_two_pieces(40.0)], max_gap=None)
+
+    assert len(kept) == 1 and not rejected
+
+
+def test_a_single_atom_has_no_gap():
+    from ase import Atoms
+
+    from autoplex_soap_turbo.data.selection import largest_fragment_gap
+
+    assert largest_fragment_gap(Atoms("H", positions=[[0, 0, 0]])) == 0.0
+
+
+def test_selection_reports_how_many_fragmented():
+    """A rising count means the dynamics are boiling the cluster, which no
+    amount of extra sampling fixes -- so it has to be visible."""
+    from autoplex_soap_turbo.data.clusters import build_cluster as bc
+    from autoplex_soap_turbo.flows.iterative_dipole import select_structures
+    from autoplex_soap_turbo.payload import frames_to_payload
+
+    good = [bc(ethanol(), 4, rng=i, number_density=0.010) for i in range(3)]
+    empty = frames_to_payload([])
+    result = select_structures.__wrapped__(
+        {"frames": frames_to_payload([*good, _two_pieces(40.0)])},
+        {"frames": {"train": empty, "test": empty}},
+        {"name": "t", "species_list": ["H", "C", "O"],
+         "selection": {"n_select": 2, "max_fragment_gap": 8.0,
+                       "min_separation": 0.85},
+         "dataset": {"initial": "unused.xyz"}},
+        iteration=0,
+    )
+
+    assert result["n_fragmented"] == 1
+    assert result["n_candidates"] == 3
