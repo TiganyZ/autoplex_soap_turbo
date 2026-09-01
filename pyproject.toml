@@ -30,6 +30,7 @@ tests = ["pytest>=7.0", "pytest-cov"]
 [project.scripts]
 autoplex-st-prepare-water = "autoplex_soap_turbo.cli:prepare_water_dataset"
 autoplex-st-run = "autoplex_soap_turbo.runner:main"
+autoplex-st-build-dataset = "autoplex_soap_turbo.data.build_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

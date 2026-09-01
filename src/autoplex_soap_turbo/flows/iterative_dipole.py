@@ -42,8 +42,10 @@ from autoplex_soap_turbo.data.dataset import (
     write_dataset,
 )
 from autoplex_soap_turbo.data.selection import (
+    drop_close_contacts,
     drop_collapsed,
     drop_fragmented,
+    drop_non_finite,
     select_diverse,
     shortest_separation,
 )
@@ -634,6 +636,135 @@ def sample_candidates(
     }
 
 
+@job(data="potentials")
+def fit_committee(dataset: dict, config: dict, iteration: int) -> dict:
+    """Fit the committee members whose disagreement scores the candidates.
+
+    A separate stage from ``fit_dipole_model`` on purpose: the model that gets
+    shipped is that one's, and this only measures confidence. Keeping them apart
+    means a committee failure cannot cost the iteration its potential, and the
+    fits that nine other workflows depend on are untouched.
+
+    The members differ because ``sparse_method=cur_points`` picks a different
+    sparse set on every run -- no resampling, no held-out folds. That also means
+    a committee says nothing for a deterministic sparse method: with
+    ``sparse_method=uniform`` every member is the same fit and the spread is
+    zero everywhere, which ranks as perfect confidence.
+    """
+    from autoplex_soap_turbo.fitting.dipole_gap import (  # noqa: PLC0415
+        DipoleFitConfig,
+        fit_dipole_gap,
+        gap_potential_files,
+    )
+
+    settings = TrainingConfig(**_rehydrate(config))
+    frames = dataset["frames"] if "frames" in dataset else dataset
+    train = as_atoms(frames["train"])
+    fit = settings.fit
+
+    workdir = Path.cwd() / f"committee_iteration_{iteration}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    train_file = write_dataset(workdir / "train.extxyz", train)
+
+    potentials, failures = [], []
+    for member in range(fit.committee_size):
+        member_dir = workdir / f"member_{member}"
+        try:
+            result = fit_dipole_gap(
+                train_file=train_file,
+                species_list=settings.species_list,
+                hyperparameters=settings.load_hyperparameters(),
+                output_dir=member_dir,
+                test_file=None,
+                config=DipoleFitConfig(
+                    dipole_key=settings.dataset.dipole_key,
+                    default_dipole_sigma=fit.default_dipole_sigma,
+                    default_sigma=tuple(fit.default_sigma),
+                    e0=fit.e0,
+                    openmp_chunk_size=fit.openmp_chunk_size,
+                    extra=fit.extra,
+                ),
+                num_processes=fit.num_processes,
+                mpi_ranks=fit.mpi_ranks,
+                gap_file_name=f"committee_{member}.xml",
+                check_executable=fit.check_executable and member == 0,
+            )
+            potentials.append(
+                files_to_payload(gap_potential_files(result["gap_file"]))
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad member is survivable
+            failures.append(f"member {member}: {exc}")
+            logger.warning("iteration %d: committee member %d failed: %s",
+                           iteration, member, exc)
+
+    if len(potentials) < 2:
+        raise RuntimeError(
+            f"iteration {iteration}: only {len(potentials)} committee member(s) "
+            f"fitted, and a spread needs at least 2. {'; '.join(failures)}"
+        )
+
+    logger.info("iteration %d: committee of %d fitted", iteration, len(potentials))
+    return {
+        "iteration": iteration,
+        "n_members": len(potentials),
+        "failures": failures,
+        "potentials": potentials,
+    }
+
+
+@job(data="frames")
+def score_candidates(
+    candidates: dict, committee: dict, config: dict, iteration: int
+) -> dict:
+    """Attach each candidate's committee spread, for uncertainty selection.
+
+    Runs on the fitting worker because that is the machine with ``quip``. The
+    spread is written under ``committee_spread`` and the committee's own mean
+    under ``committee_dipole`` -- never under the reference name, or the next
+    fit would train on its predecessor's guess.
+    """
+    from autoplex_soap_turbo.fitting.committee import (  # noqa: PLC0415
+        SPREAD_KEY,
+        predict_with_committee,
+    )
+
+    pool = as_atoms(candidates["frames"] if "frames" in candidates else candidates)
+    workdir = Path.cwd() / f"committee_score_{iteration}"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    potentials = []
+    for index, payload in enumerate(committee["potentials"]):
+        member_dir = workdir / f"member_{index}"
+        payload_to_files(payload, member_dir)
+        potentials.append(member_dir / main_file(payload, ".xml"))
+
+    scored = predict_with_committee(pool, potentials, workdir)
+    spreads = [f.info[SPREAD_KEY] for f in scored]
+    return {
+        "iteration": iteration,
+        "n_scored": len(scored),
+        "n_members": len(potentials),
+        "spread_mean": round(sum(spreads) / len(spreads), 6) if spreads else None,
+        "spread_max": round(max(spreads), 6) if spreads else None,
+        "frames": frames_to_payload(scored),
+    }
+
+
+def _mean_spread(frames) -> float | None:
+    """Mean committee spread over the chosen frames, or None if unscored.
+
+    Plain Python rather than numpy: this module imports numpy only inside the
+    functions that need it, and a module-level name here would be a NameError
+    the first time an uncertainty-selected run reached this line.
+    """
+    values = [
+        float(frame.info["committee_spread"])
+        for frame in frames
+        if "committee_spread" in frame.info
+    ]
+    return round(sum(values) / len(values), 6) if values else None
+
+
 @job(data="frames")
 def select_structures(candidates: dict, dataset: dict, config: dict, iteration: int) -> dict:
     """Reduce the candidates to the ones worth an FHI-aims calculation."""
@@ -644,11 +775,26 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
     frames = dataset["frames"] if "frames" in dataset else dataset
     existing = as_atoms(frames["train"])
 
-    # Before diversity, sanity. Farthest-point selection actively prefers a
-    # collapsed structure -- it is unlike everything already known, which is
-    # exactly the criterion -- so the geometries no DFT code can handle are the
-    # ones most likely to be chosen.
+    # Before any threshold at all: arithmetic. A diverged trajectory is written
+    # out and exits cleanly, and its last frame is all NaN -- which passes every
+    # check below, because `nan < floor` is False for any floor, and which
+    # farthest-point selection then prefers above everything else, having no
+    # finite distance to anything known. A filter cannot reject what it cannot
+    # compare, so this runs first.
     n_pool = len(pool)
+    pool, non_finite = drop_non_finite(pool)
+    n_non_finite = len(non_finite)
+    if not pool:
+        raise ValueError(
+            f"every one of the {n_pool} candidates has non-finite coordinates. "
+            "The sampling diverged -- check the trajectory and the thermostat "
+            "rather than the selection settings."
+        )
+
+    # Then sanity. Farthest-point selection actively prefers a collapsed
+    # structure -- it is unlike everything already known, which is exactly the
+    # criterion -- so the geometries no DFT code can handle are the ones most
+    # likely to be chosen.
     pool, rejected = drop_collapsed(pool, selection.min_separation)
     if not pool:
         raise ValueError(
@@ -657,6 +803,33 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
             "short-range repulsion -- check whether the converted potential "
             "kept its core_pot descriptors."
         )
+
+    # Then chemistry. `drop_collapsed` above thresholds every interatomic
+    # distance with one number, which for a molecular system has to sit below
+    # the shortest bond -- 0.80 A for water -- and so cannot see two molecules
+    # jammed into each other at an O-O of 1.9 A. That is not a geometry the
+    # liquid visits, but DFT converges it without complaint, and the model then
+    # spends capacity on it. A round-2 batch here reached DFT with 96% of its
+    # frames below an O-O of 2.2 A, against none of the equilibrated data.
+    n_close = 0
+    pairs = selection.pair_separations()
+    if pairs:
+        pool, close = drop_close_contacts(pool, pairs)
+        n_close = len(close)
+        if not pool:
+            raise ValueError(
+                f"every one of the {n_pool} candidates has a pair closer than "
+                f"selection.min_pair_separation allows; the first was rejected "
+                f"for {close[0].info['close_contact']}. Either the floor is too "
+                "high for this chemistry, or the sampler is packing structures "
+                "it never relaxed."
+            )
+        if n_close:
+            logger.info(
+                "iteration %d: %d of %d candidates were dropped for close "
+                "contacts (%s)", iteration, n_close, n_close + len(pool),
+                ", ".join(f"{a}-{b} < {f}" for (a, b), f in pairs.items()),
+            )
 
     # Then integrity. The mirror of the collapse check above: that one catches
     # a sampler with no short-range repulsion, this one catches a finite cluster
@@ -697,16 +870,36 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
             )
         pool = affordable
 
-    chosen = select_diverse(
-        pool,
-        n_select=selection.n_select,
-        existing=existing,
-        method=selection.method,
-        seed=settings.dataset.seed + iteration,
-        r_cut=selection.r_cut,
-        n_bins=selection.n_bins,
-        sigma=selection.sigma,
-    )
+    if selection.method == "uncertainty":
+        # Where a committee disagrees, then farthest-point inside that
+        # shortlist. `sample_candidates` attaches the spread; a pool without it
+        # means the committee never ran, and selecting on FPS instead would
+        # spend the same DFT while only the log said the acquisition was gone.
+        from autoplex_soap_turbo.data.selection import (  # noqa: PLC0415
+            select_by_uncertainty,
+        )
+
+        chosen = select_by_uncertainty(
+            pool,
+            n_select=selection.n_select,
+            diversity_factor=selection.uncertainty_shortlist,
+            existing=existing,
+            seed=settings.dataset.seed + iteration,
+            r_cut=selection.r_cut,
+            n_bins=selection.n_bins,
+            sigma=selection.sigma,
+        )
+    else:
+        chosen = select_diverse(
+            pool,
+            n_select=selection.n_select,
+            existing=existing,
+            method=selection.method,
+            seed=settings.dataset.seed + iteration,
+            r_cut=selection.r_cut,
+            n_bins=selection.n_bins,
+            sigma=selection.sigma,
+        )
 
     logger.info(
         "iteration %d: selected %d of %d candidates", iteration, len(chosen), len(pool)
@@ -725,6 +918,20 @@ def select_structures(candidates: dict, dataset: dict, config: dict, iteration: 
         # A rising count here means the dynamics are evaporating the cluster,
         # which no amount of extra sampling fixes.
         "n_fragmented": n_fragmented,
+        # Reported even when the filter is off, so that a run which never
+        # configured it reads as a zero rather than as a silence. This is the
+        # count that would have said the round-2 batch was packed and not
+        # relaxed, before it cost 200 DFPT calculations to find out.
+        "n_close_contacts": n_close,
+        # Anything but zero here means the sampling diverged, which is a
+        # different problem from any of the ones above and is not fixed by
+        # sampling more.
+        "n_non_finite": n_non_finite,
+        # The committee spread of what was actually chosen. A run where this
+        # falls toward zero has stopped finding anything the model is unsure
+        # about, which is a reason to stop rather than a reason to keep paying
+        # for DFT.
+        "spread_selected": _mean_spread(chosen),
         "shortest_separation": (
             round(min(shortest_separation(a) for a in chosen), 4) if chosen else None
         ),
@@ -992,8 +1199,59 @@ def _fit_digest(result: dict | None, energy: bool = False) -> dict | None:
     return {key: result.get(key) for key in keys if key in result}
 
 
-# ``expose_store`` is what puts the store on ``CURRENT_JOB``; without it this
-# job has no way to reach the thing it exists to read.
+def _stored_output(uuid: str) -> dict:
+    """Fetch a job's stored output, from wherever this process can reach it.
+
+    Running under jobflow-remote, the store a job is handed is *not* the
+    database: it is a ``StdJSONStore`` over two files in the run directory.
+    Workers never talk to MongoDB -- the runner resolves references on their
+    behalf and uploads their results afterwards -- so the exposed store knows
+    only about this one job and a lookup through it always comes back empty.
+
+    The real store has to be built from the jobflow-remote project
+    configuration, which means this can only run somewhere that configuration
+    exists: the runner. That is where it does run, having no worker of its own,
+    but the requirement is worth failing loudly about rather than leaving to be
+    rediscovered from an empty query.
+
+    Run locally -- in the tests, under ``run_locally`` -- there is no project,
+    and the exposed store *is* the real one. Hence both, in that order.
+    """
+    from jobflow import CURRENT_JOB
+
+    store = CURRENT_JOB.store
+    if store is not None:
+        try:
+            output = store.get_output(uuid, load=True)
+        except ValueError:
+            output = None          # not this store's to know about; try the project
+        if output is not None:
+            return output
+
+    try:
+        from jobflow_remote.config import ConfigManager
+
+        project_store = ConfigManager().get_project().get_jobstore()
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        raise ValueError(
+            f"cannot read the output of job {uuid}: the store this job was "
+            "given does not contain it, and the jobflow-remote project "
+            f"configuration is not reachable from here either ({exc}). This "
+            "job has to run on the machine hosting the project -- the runner "
+            "-- because that is the only place the real job store is defined."
+        ) from exc
+
+    project_store.connect()
+    output = project_store.get_output(uuid, load=True)
+    if output is None:
+        raise ValueError(
+            f"no output stored for job {uuid}. The gate was given the uuid of a "
+            "job that has not stored a result, so the iteration it is building "
+            "has nothing to work from."
+        )
+    return output
+
+
 @job(data=["frames", "potential"], config=JobConfig(expose_store=True))
 def load_stored_output(uuid: str) -> dict:
     """Read a previous job's output back out of the job store.
@@ -1018,15 +1276,7 @@ def load_stored_output(uuid: str) -> dict:
     document on the way back through; without them the loader would simply move
     the overflow one job downstream.
     """
-    from jobflow import CURRENT_JOB
-
-    output = CURRENT_JOB.store.get_output(uuid, load=True)
-    if output is None:
-        raise ValueError(
-            f"no output stored for job {uuid}. The gate was given the uuid of a "
-            "job that has not stored a result, so the iteration it is building "
-            "has nothing to work from."
-        )
+    output = _stored_output(uuid)
     n_frames = output.get("frames") if isinstance(output, dict) else None
     if isinstance(n_frames, dict):
         logger.info(
@@ -1178,13 +1428,34 @@ def convergence_gate(
     else:
         dataset = dataset_ref
 
+    # The fitted potential is the other payload with real size -- 26 MB for the
+    # ethanol dipole model -- and the gate resolves it to score the iteration.
+    # Sampling needs the potential itself, so it comes back through a loader
+    # rather than being copied into the stored call.
+    def _via_loader(uuid: str | None, resolved, label: str):
+        if not uuid:
+            return resolved
+        loader = load_stored_output(uuid)
+        loader.name = f"{settings.name}: {label} {iteration}"
+        head.append(loader)
+        return loader.output
+
+    sample_fit = _via_loader(fit_uuid, fit_result, "dipole model")
+    sample_energy_fit = _via_loader(
+        energy_fit_uuid, energy_fit_result, "energy model"
+    )
+
     sample = sample_candidates(
-        dataset, fit_result, config, iteration, energy_fit_result=energy_fit_result
+        dataset, sample_fit, config, iteration,
+        energy_fit_result=sample_energy_fit,
     )
     sample.name = f"{settings.name}: sample {iteration}"
     apply_worker(sample, settings.sampling)
 
-    select = select_structures(sample.output, dataset, config, iteration)
+    extra, candidates = _uncertainty_stage(
+        sample.output, dataset, settings, config, iteration
+    )
+    select = select_structures(candidates, dataset, config, iteration)
     select.name = f"{settings.name}: select {iteration}"
 
     reference = _reference_stage(select.output, settings, iteration)
@@ -1217,7 +1488,7 @@ def convergence_gate(
 
     return Response(
         replace=Flow(
-            [*head, sample, select, reference, merge, following],
+            [*head, sample, *extra, select, reference, merge, following],
             output=following.output,
             name=f"{settings.name}: iteration {iteration + 1}",
         )
@@ -1378,41 +1649,15 @@ def extract_potential(fit_result: dict, destination: str) -> dict:
 
 
 def _rehydrate(config: dict) -> dict:
-    """Rebuild a TrainingConfig's constructor arguments from its dict form.
+    """The settings a job received, as constructor arguments again.
 
-    The settings travel to every worker as plain data, so the nested sections
-    come back as dictionaries and have to be turned into their dataclasses
-    again.
+    Kept as a local name because twelve jobs call it; the implementation is
+    :func:`autoplex_soap_turbo.config.rehydrate`, which is also what
+    :meth:`TrainingConfig.from_dict` uses.
     """
-    from autoplex_soap_turbo.config import (  # noqa: PLC0415
-        AimsSettings,
-        DatasetSettings,
-        EnergyFitSettings,
-        FitSettings,
-        SamplingSettings,
-        SelectionSettings,
-        ValidationSettings,
-        VaspSettings,
-    )
+    from autoplex_soap_turbo.config import rehydrate  # noqa: PLC0415
 
-    models = {
-        "dataset": DatasetSettings,
-        "aims": AimsSettings,
-        "vasp": VaspSettings,
-        "fit": FitSettings,
-        "energy_fit": EnergyFitSettings,
-        "sampling": SamplingSettings,
-        "selection": SelectionSettings,
-        "validation": ValidationSettings,
-    }
-    data = dict(config)
-    for key, model in models.items():
-        value = data.get(key)
-        if isinstance(value, dict):
-            data[key] = model(**value)
-    if "root" in data:
-        data["root"] = Path(data["root"])
-    return data
+    return rehydrate(config)
 
 
 def iterative_dipole_training(settings: TrainingConfig) -> Flow:
@@ -1493,7 +1738,11 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
         apply_worker(sample, settings.sampling)
         jobs.append(sample)
 
-        select = select_structures(sample.output, dataset_ref, config, iteration)
+        extra, candidates = _uncertainty_stage(
+            sample.output, dataset_ref, settings, config, iteration
+        )
+        jobs.extend(extra)
+        select = select_structures(candidates, dataset_ref, config, iteration)
         select.name = f"{settings.name}: select {iteration}"
         jobs.append(select)
 
@@ -1511,6 +1760,27 @@ def iterative_dipole_training(settings: TrainingConfig) -> Flow:
     jobs.append(summary)
 
     return Flow(jobs, output=summary.output, name=settings.name)
+
+
+def _uncertainty_stage(sample_output, dataset_ref, settings, config, iteration):
+    """The committee fit and the scoring job, when uncertainty selection is on.
+
+    Returns ``(jobs, candidates_for_selection)``. With farthest-point selection
+    there is nothing to add and the candidates go to `select` untouched, so this
+    returns no jobs and the sampler's own output.
+    """
+    if settings.selection.method != "uncertainty":
+        return [], sample_output
+
+    committee = fit_committee(dataset_ref, config, iteration)
+    committee.name = f"{settings.name}: committee {iteration}"
+    apply_worker(committee, settings.fit)
+
+    scored = score_candidates(sample_output, committee.output, config, iteration)
+    scored.name = f"{settings.name}: score {iteration}"
+    # The fitting worker, because that is the machine with quip.
+    apply_worker(scored, settings.fit)
+    return [committee, scored], scored.output
 
 
 def _dataset_stage(settings: TrainingConfig, config: dict):
@@ -1731,6 +2001,10 @@ def _iteration_flow(
         # each iteration reads it from the same place rather than from the
         # previous iteration's copy of it.
         test_set_uuid=test_set_uuid,
+        fit_uuid=_dataset_uuid(fit.output),
+        energy_fit_uuid=(
+            _dataset_uuid(energy_fit_output) if energy_fit_output is not None else None
+        ),
     )
     gate.name = f"{settings.name}: check {iteration}"
     jobs.append(gate)

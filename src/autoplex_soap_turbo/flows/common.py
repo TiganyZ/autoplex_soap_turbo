@@ -13,7 +13,32 @@ from autoplex_soap_turbo.payload import frames_from_payload
 logger = logging.getLogger(__name__)
 
 
-def apply_worker(target, settings: WorkerSettings | None, propagate: bool = True):
+def manager_config(settings: WorkerSettings | None) -> dict:
+    """The jobflow-remote ``manager_config`` for a worker assignment.
+
+    Split out of :func:`apply_worker` because ``flows/vasp_rss.py`` needs the
+    dict on its own: autoplex's RSS flow is pinned by ``name_filter`` over jobs
+    it created itself, rather than by holding each job.
+    """
+    if settings is None:
+        return {}
+
+    manager: dict = {}
+    if settings.worker:
+        manager["worker"] = settings.worker
+    if settings.exec_config:
+        manager["exec_config"] = settings.exec_config
+    if settings.resources:
+        manager["resources"] = dict(settings.resources)
+    return manager
+
+
+def apply_worker(
+    target,
+    settings: WorkerSettings | None,
+    propagate: bool = True,
+    name_filter: str | None = None,
+):
     """Pin a job or flow to a worker, exec_config and resource request.
 
     jobflow-remote reads these from ``manager_config``. Setting them on the flow
@@ -37,18 +62,17 @@ def apply_worker(target, settings: WorkerSettings | None, propagate: bool = True
     every one of them submitted on the single core the dispatcher had asked for
     itself.
     """
-    if settings is None:
+    manager = manager_config(settings)
+    if not manager:
         return target
 
-    manager: dict = {}
-    if settings.worker:
-        manager["worker"] = settings.worker
-    if settings.exec_config:
-        manager["exec_config"] = settings.exec_config
-    if settings.resources:
-        manager["resources"] = dict(settings.resources)
-
-    if not manager:
+    if name_filter is not None:
+        # Pinning jobs inside a flow this code did not build -- autoplex's RSS
+        # maker creates its own -- so they are selected by name. `dynamic=True`
+        # because the RSS job expands at run time and its children need it too.
+        target.update_config(
+            {"manager_config": manager}, name_filter=name_filter, dynamic=True
+        )
         return target
 
     if propagate:

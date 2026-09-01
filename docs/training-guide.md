@@ -753,6 +753,55 @@ Only in a gated run, and the job that makes the loop a loop. It compares the
 summary or builds the rest of this iteration plus the next one. It is the only
 stage whose output is a decision rather than data.
 
+It is also the stage where a long run used to die, for a reason worth
+understanding before you change anything near it.
+
+---
+
+### Why the loop passes uuids around, and what breaks if you stop
+
+The jobs a gate builds are serialised into the gate's **own output document**,
+arguments and all. So anything a gate hands to those jobs is written to the
+database once per job that receives it -- and MongoDB refuses a document over
+16 MB. Three payloads are large enough to matter:
+
+| what | ethanol, iteration 0 | passed to |
+|---|---|---|
+| the training set | 27 MB | `sample`, `select`, `merge` |
+| the fitted dipole model | 26 MB | `sample` |
+| the validation set | ~2.8 MB | the next `check` |
+
+Passed by value, ethanol's first gate emitted **30,074,423 bytes** and the write
+failed. The failure is the bad kind: the job recorded itself finished with no
+output, so it could neither complete nor be rerun, and the run sat in
+`DOWNLOADED` looking merely slow. `sample` was on the same path, reaching 5.1 MB
+by iteration 6 of the water ladder and growing 812 kB per iteration.
+
+The gate therefore receives a **uuid** for each of these, not the payload, and
+the flow it builds begins with `load_stored_output` jobs that read them back.
+The same gate output is now **53,967 bytes** and no longer grows with the
+dataset at all.
+
+Two constraints make this the shape it is, and both will bite anyone who tries
+to simplify it:
+
+**You cannot hand the next job an `OutputReference` instead.** jobflow-remote
+calls `get_flow(response.replace)` with `allow_external_references=False` hard
+coded, and every job a gate needs to point at lives *outside* the replacement
+flow. The flow is rejected before it runs. Referencing a loader inside the
+replacement is what makes the references resolvable.
+
+**A loader cannot use the store its job was given.** Under jobflow-remote a job
+receives a `StdJSONStore` over two files in its run directory, not the database
+-- workers never talk to MongoDB, the runner resolves their references and
+uploads their results. A lookup through that store always comes back empty. So
+`load_stored_output` builds the real store from the jobflow-remote project
+configuration, which means **it has to run on the runner**. It has no worker
+override, so it does; if you give it one, it will fail with an empty query.
+
+If you are adding a stage that takes something large from a gate, give it the
+uuid and a loader, not the object.
+
 ---
 
 ### Regularization
@@ -967,7 +1016,7 @@ Cheapest first. Each layer catches things the next one cannot.
 ### Before you run anything
 
 ```bash
-autoplex_venv/bin/python -m pytest tests/ -q      # 269 tests
+autoplex_venv/bin/python -m pytest tests/ -q      # all of them; seconds
 python workflows/lif/run.py --dry-run             # builds the flow, submits nothing
 bash setup/check_setup.sh                         # verifies every machine, changes nothing
 ```

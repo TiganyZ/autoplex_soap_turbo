@@ -185,6 +185,201 @@ def drop_collapsed(
     return kept, rejected
 
 
+#: Closest approach, in Angstrom, that a pair of elements may make before the
+#: configuration is treated as strained rather than merely compressed.
+#:
+#: Empty by default: a sensible floor is chemistry, not a constant, and a wrong
+#: one silently discards good data. For water the entry that matters is
+#: ``("O", "O"): 2.4`` -- the dimer sits at 2.98 A and ice Ih at 2.76, and below
+#: about 2.4 the two molecules are strongly repulsive.
+DEFAULT_PAIR_SEPARATIONS: dict[tuple[str, str], float] = {}
+
+
+def min_pair_separation(atoms, a: str, b: str) -> float:
+    """Closest approach between elements ``a`` and ``b`` in one configuration.
+
+    ``inf`` when the pair is not present, so a caller filtering on it keeps a
+    frame that simply has no such pair rather than discarding it.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    symbols = atoms.get_chemical_symbols()
+    positions = np.asarray(atoms.get_positions(), dtype=float)
+    ia = [i for i, s in enumerate(symbols) if s == a]
+    ib = [i for i, s in enumerate(symbols) if s == b]
+    if not ia or not ib:
+        return float("inf")
+
+    d = np.linalg.norm(positions[ia][:, None, :] - positions[ib][None, :, :], axis=-1)
+    if a == b:
+        if len(ia) < 2:
+            return float("inf")
+        return float(d[np.triu_indices(len(ia), k=1)].min())
+    return float(d.min())
+
+
+def is_finite_structure(atoms) -> bool:
+    """Whether every coordinate in the structure is a real number.
+
+    Diverging dynamics do not usually announce themselves. turboGAP writes the
+    trajectory, exits 0, and the last frame is all NaN -- and NaN then defeats
+    every threshold downstream, because `nan < floor` is False for any floor.
+    A structure that has come apart numerically therefore passes the collapse
+    check, passes the close-contact check, and is the *most* attractive frame
+    farthest-point selection can be offered, having no finite distance to
+    anything already known.
+
+    This is not hypothetical either: a 2000-step walk at 300 K over a packed
+    water cluster went to NaN at step 499, and the batch it produced was
+    reported as "keeping 2, rejecting 0" by a filter working exactly as
+    designed.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    return bool(np.all(np.isfinite(np.asarray(atoms.get_positions(), dtype=float))))
+
+
+def drop_non_finite(candidates: Sequence[Atoms]) -> tuple[list[Atoms], list[Atoms]]:
+    """Split off configurations carrying a non-finite coordinate.
+
+    Run this before any threshold, not after: a threshold cannot reject what it
+    cannot compare.
+    """
+    kept, rejected = [], []
+    for frame in candidates:
+        if is_finite_structure(frame):
+            kept.append(frame)
+        else:
+            frame.info["non_finite"] = True
+            rejected.append(frame)
+    if rejected:
+        logger.warning(
+            "%d of %d configurations have non-finite coordinates and were "
+            "discarded; the dynamics that produced them diverged",
+            len(rejected), len(candidates),
+        )
+    return kept, rejected
+
+
+def drop_close_contacts(
+    candidates: Sequence[Atoms],
+    pairs: dict[tuple[str, str], float] | None = None,
+) -> tuple[list[Atoms], list[Atoms]]:
+    """Drop configurations where a named pair of elements is too close.
+
+    :func:`drop_collapsed` cannot do this job. It thresholds *every* interatomic
+    distance with one number, so for a molecular system that number has to sit
+    below the shortest intramolecular bond -- 0.80 A for water, because of the
+    0.96 A O-H. A threshold that low cannot see two water molecules jammed
+    together at an O-O of 1.9 A, which is a geometry no liquid ever visits and
+    that DFT will nonetheless converge without complaint.
+
+    This is not hypothetical. A batch of 200 water clusters was generated with
+    `build_cluster(min_separation=1.6)` -- an *atom-atom* floor, copied from a
+    workflow whose comment justifies 1.6 for H...O hydrogen bonds. It permits
+    O-O at 1.6 A, and 96% of the batch came back with an O-O below 2.2 A against
+    0% for the equilibrated data. Every downstream check passed: the DFT
+    converged, the harvest was clean, and the aggregate dipole per root-molecule
+    looked right, because that measure is global and blind to local strain.
+
+    That batch was first blamed for a fourfold regression in the mid-size
+    cluster error. It was not responsible -- the baseline it was measured
+    against had been fitted on a file that shared 26 frames with the test set,
+    and at matched settings the batch in fact *improved* the model. The
+    geometries are still wrong, which is why this check exists, but the cost of
+    a bad configuration here is capacity spent describing a geometry the liquid
+    never visits, not a measurable regression.
+
+    ``pairs`` maps an element pair to its floor. Nothing is dropped when it is
+    empty, which is the default -- the right floor is chemistry.
+    """
+    pairs = pairs or DEFAULT_PAIR_SEPARATIONS
+    if not pairs:
+        return list(candidates), []
+
+    kept, rejected = [], []
+    for frame in candidates:
+        # Before any comparison. `nan < floor` is False, so a diverged frame
+        # would otherwise be reported as having passed the check.
+        if not is_finite_structure(frame):
+            frame.info["close_contact"] = "non-finite coordinates"
+            frame.info["non_finite"] = True
+            rejected.append(frame)
+            continue
+        worst = None
+        for (a, b), floor in pairs.items():
+            separation = min_pair_separation(frame, a, b)
+            if separation < floor:
+                worst = (a, b, separation, floor)
+                break
+        if worst is None:
+            kept.append(frame)
+        else:
+            a, b, separation, floor = worst
+            frame.info["close_contact"] = f"{a}-{b} {separation:.2f} < {floor}"
+            rejected.append(frame)
+
+    if rejected:
+        logger.warning(
+            "%d of %d configurations dropped for a close contact; the first is %s",
+            len(rejected), len(candidates), rejected[0].info["close_contact"],
+        )
+    return kept, rejected
+
+
+def select_by_uncertainty(
+    candidates: Sequence[Atoms],
+    n_select: int,
+    spread_key: str = "committee_spread",
+    diversity_factor: float = 3.0,
+    existing: Sequence[Atoms] | None = None,
+    seed: int = 0,
+    **fingerprint_kwargs,
+) -> list[Atoms]:
+    """Pick the candidates a committee disagrees most about, then spread them out.
+
+    Ranking on uncertainty alone is the obvious thing and it is a trap: the most
+    uncertain configurations are usually the most *unusual* ones, and the top of
+    that ranking tends to be several views of one unusual thing. A batch of ten
+    frames from the same distorted cluster costs ten DFT calculations and buys
+    roughly one.
+
+    So this is a two-stage acquisition, which is what the literature calls
+    batch-mode active learning: take the ``diversity_factor * n_select`` most
+    uncertain candidates, then run the existing farthest-point selection inside
+    that shortlist. Uncertainty decides *where* to look, diversity decides what
+    to bring back.
+
+    On 179 held-out water frames a committee of 8 recovered 96% of the error an
+    oracle would have found in its top ten, at a 5.2x enrichment over random --
+    which is what makes the first stage worth doing at all.
+    """
+    pool = [frame for frame in candidates if spread_key in frame.info]
+    if not pool:
+        raise ValueError(
+            f"no candidate carries '{spread_key}'. Score them with "
+            "fitting.committee.predict_with_committee before selecting on it."
+        )
+    if len(pool) != len(candidates):
+        logger.warning(
+            "%d of %d candidates carry no %s and were not considered",
+            len(candidates) - len(pool), len(candidates), spread_key,
+        )
+
+    ranked = sorted(pool, key=lambda f: -float(f.info[spread_key]))
+    shortlist = ranked[: max(n_select, int(diversity_factor * n_select))]
+    logger.info(
+        "uncertainty: shortlisted %d of %d candidates, spread %.5f down to %.5f",
+        len(shortlist), len(pool),
+        float(shortlist[0].info[spread_key]),
+        float(shortlist[-1].info[spread_key]),
+    )
+    return select_diverse(
+        shortlist, n_select=n_select, existing=existing, method="fps",
+        seed=seed, **fingerprint_kwargs,
+    )
+
+
 def select_diverse(
     candidates: Sequence[Atoms],
     n_select: int,

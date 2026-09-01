@@ -23,9 +23,27 @@ fork](https://github.com/TiganyZ/autoplex) this repository pins teaches autoplex
 to fit. That is what lets a potential from either workflow drive the turboGAP MD
 that samples configurations for the next round.
 
-**New here?** [`docs/training-guide.md`](docs/training-guide.md) walks from an
-empty machine to a fitted model in order, with LiF as the worked example. This
-README is the reference; that is the path through it.
+**New here?** [`examples/minimal/`](examples/minimal/) is a complete run you can
+execute in seconds with nothing installed but this package — no cluster, no
+MongoDB, no `gap_fit`, no DFT. Then
+[`docs/training-guide.md`](docs/training-guide.md) walks from an empty machine
+to a real fitted model, with LiF as the worked example. This README is the
+reference; those are the paths through it.
+
+**Every settings key**, with its type and default, is
+[`docs/settings-reference.md`](docs/settings-reference.md), generated from
+`config.py` so it cannot drift.
+
+**Uncertainty-driven selection.** `selection.method: uncertainty` picks the
+candidates a committee of fits disagrees most about, then spreads them out.
+QUIP gives no sparse-GPR variance for a dipole model, so the committee comes
+from refitting — `sparse_method=cur_points` makes every fit different for free.
+See [`docs/water-dipole-training.md`](docs/water-dipole-training.md).
+
+**Already have the DFT?**
+[`docs/building-a-training-set.md`](docs/building-a-training-set.md) turns a
+tree of finished FHI-aims or VASP calculations into one converged
+`train.extxyz`, and refuses to mix settings or count a configuration twice.
 
 **Need a workflow that does not exist yet?**
 [`docs/custom-workflows.md`](docs/custom-workflows.md) covers building one — a
@@ -326,19 +344,43 @@ src/autoplex_soap_turbo/
                            dipole and for energy models, and scoring
   turbogap/                MD sampling
   flows/                   the two workflows
-workflows/                 runnable configurations
+  runner.py                the command line every workflow shares
+  stubs.py                 fake cluster stages, for `run.py --stub`
+scripts/
+  new_workflow.py          stamp out a new workflows/<name>/
+  gen_settings_reference.py  docs/settings-reference.md, from config.py
+examples/minimal/          a complete run that needs nothing installed
+workflows/                 runnable configurations; see workflows/README.md
 autoplex/                  submodule: the soap-turbo-descriptors fork
 ```
 
 ## Tests
 
 ```bash
-source autoplex_venv/bin/activate
-python -m pytest tests/ -q
+./autoplex_venv/bin/python -m pytest tests/ -q
 ```
+
+Use `autoplex_venv`, not `.venv`. The latter is the light environment
+`pyproject.toml` describes and carries neither pytest nor autoplex; the former
+is what `setup/setup_env_uv.sh` builds and what real runs use.
 
 The subprocess tests run real `gap_fit` and `quip` when they are on `PATH` and
 skip when they are not.
+
+Before submitting anything, in the order they get cheaper to fix:
+
+```bash
+./autoplex_venv/bin/python -m pytest tests/ -q
+python workflows/<name>/run.py --dry-run      # shape, names, workers
+python workflows/<name>/run.py --stub         # run it here in seconds
+bash setup/setup_all_machines.sh --sync-only  # every machine has its own copy
+```
+
+`--stub` replaces the fit, the sampler and the reference stage with functions
+returning the same shapes, and runs everything between them for real, into an
+in-memory job store. It checks the parts that otherwise fail an hour into a run
+on a cluster: payload routing, serialisation across every job boundary, and a
+convergence gate resolving through its own replacements.
 
 ## Things that bite
 

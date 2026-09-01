@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,59 @@ def is_turbogap_format(path: str | Path) -> bool:
     return False
 
 
+def declared_species(potential: str | Path) -> list[str]:
+    """The species a turboGAP potential says it was built for, in its own order.
+
+    Read from the ``species = ...`` line of a ``soap_turbo`` block. The order is
+    the point, not just the membership: turboGAP resolves a block's
+    ``central_species = N`` against the *input file's* species list by position,
+    so the two lists have to agree element for element.
+
+    Returns an empty list for a potential that declares none, which is not an
+    error -- a pure two-body potential has ``species1``/``species2`` per block
+    and no positional index to get wrong.
+    """
+    species: list[str] = []
+    for line in Path(potential).read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("species ") or stripped.startswith("species="):
+            _, _, value = stripped.partition("=")
+            found = value.split()
+            if found and not species:
+                species = found
+    return species
+
+
+def check_species_match(potential: str | Path, species_list: Sequence[str]) -> None:
+    """Refuse a species list that does not match what the potential declares.
+
+    turboGAP maps each ``soap_turbo`` block's ``central_species = N`` onto the
+    Nth entry of the species list in the *input file*. If those lists differ,
+    every block is evaluated against the wrong element and nothing says so: the
+    run starts, the forces are wrong, and the dynamics diverge somewhere in the
+    middle with no message naming the cause.
+
+    That is not hypothetical. A CHO potential declaring ``species = H C O`` was
+    run with ``species = H O``, so its ``central_species = 2`` block -- carbon's
+    -- was applied to oxygen. Gradient descent still reduced the energy
+    monotonically, because it was faithfully minimising the wrong potential; the
+    dynamics then went to NaN at step 500 with the total energy frozen at a
+    value that is not an energy. It cost two runs to notice, and only because
+    the second failed the same way as the first.
+    """
+    declared = declared_species(potential)
+    if not declared:
+        return
+    if list(species_list) != declared:
+        raise ValueError(
+            f"{Path(potential).name} was built for species {declared}, but this "
+            f"run declares {list(species_list)}. turboGAP matches a descriptor's "
+            "central_species to the species list by position, so these must be "
+            "the same list in the same order -- include every species the "
+            "potential names, even ones the structure does not contain."
+        )
+
+
 def adopt_turbogap_potential(potential: str | Path, run_dir: str | Path, name: str) -> Path:
     """Copy an already-converted potential and its data files into ``run_dir``.
 
@@ -113,6 +167,44 @@ def adopt_turbogap_potential(potential: str | Path, run_dir: str | Path, name: s
     _rewrite_paths(adopted, f"{GAP_FILES_DIR}/{name}/")
     logger.info("adopted %s as %s (no reconversion)", potential.name, adopted)
     return adopted
+
+
+#: ``key = ""value""`` -- a quoted string that has been quoted twice.
+_DOUBLE_QUOTED = re.compile(r'^(\s*\w+\s*=\s*)""([^"]*)""(\s*)$')
+
+
+def normalise_quoting(potential: str | Path) -> int:
+    """Collapse doubled quotes in a converted potential, returning how many.
+
+    A ``gap_fit`` descriptor string carries its string options already quoted --
+    ``compress_mode="trivial"`` -- and the converter quotes the value it reads
+    a second time, emitting ``compress_mode = ""trivial""``. turboGAP does not
+    parse that, and what it says is not that the value is malformed but that the
+    keyword is *missing*:
+
+        ERROR: you're trying to use compression but neither a file_compress_soap
+        nor compress_mode are defined!
+
+    which sends the reader looking for an absent line rather than at the one
+    that is there. It then exits **0**, having written no trajectory.
+
+    Only the energy model in a pair is usually hand-checked, so this shows up on
+    the dipole model, whose blocks are the ones that came from this campaign's
+    own ``gap_fit`` invocation.
+    """
+    path = Path(potential)
+    lines = path.read_text(errors="replace").splitlines(keepends=True)
+    fixed = 0
+    for index, line in enumerate(lines):
+        match = _DOUBLE_QUOTED.match(line.rstrip("\n"))
+        if match:
+            prefix, value, trailing = match.groups()
+            lines[index] = f'{prefix}"{value}"{trailing}\n'
+            fixed += 1
+    if fixed:
+        path.write_text("".join(lines))
+        logger.info("normalised %d doubly-quoted value(s) in %s", fixed, path.name)
+    return fixed
 
 
 def convert_potential(
@@ -160,6 +252,11 @@ def convert_potential(
 
     potential = target / f"{name}.gap"
     _rewrite_paths(potential, f"{GAP_FILES_DIR}/{name}/")
+    # After the paths are rewritten and before anything reads the file. The
+    # converter re-quotes values that arrived already quoted from the gap_fit
+    # args string, and turboGAP reports the result as a *missing* keyword
+    # rather than a malformed one, then exits 0 having written no trajectory.
+    normalise_quoting(potential)
     logger.info("converted %s to %s", gap_xml.name, potential)
     return potential, list(conversion.get("dropped_descriptors") or [])
 
@@ -270,6 +367,9 @@ def build_md_potential(
         # Already converted, and therefore complete. Nothing to extract e0 from
         # either -- a turboGAP potential does not carry them; they go in the
         # input file, and the caller supplies them.
+        # Before it is copied: an adopted potential is taken verbatim, so
+        # nothing downstream will ever compare its species to the caller's.
+        check_species_match(energy_gap, species_list)
         energy_potential = adopt_turbogap_potential(energy_gap, run_dir, "energy")
         dropped: list[str] = []
         isolated_atom_energies = {}
@@ -299,6 +399,7 @@ def build_md_potential(
             # whatever the converter cannot represent. A dipole GAP fitted
             # through this repo also arrives already flagged, and
             # mark_as_dipole_model is a no-op in that case.
+            check_species_match(dipole_gap, species_list)
             dipole_potential = adopt_turbogap_potential(dipole_gap, run_dir, "dipole")
         else:
             dipole_potential, _ = convert_potential(

@@ -192,7 +192,30 @@ selection:
   # two are equally unlearnable; their dipoles simply happened not to blow up.
   # Filtering on the dipole instead would be circular, since that is the fit
   # target -- so the filter is geometric.
-  max_fragment_gap: 8.0
+  #
+  # Lowered from 8.0 after the first full ten-iteration run, which 8.0 did not
+  # save. Measured over all 180 reference frames that run computed, scoring each
+  # by |mu| / sqrt(N molecules) -- the right normalisation, because randomly
+  # oriented molecules add as a random walk, so an intact cluster sits near the
+  # 0.352 e*Angstrom monomer dipole however many molecules it holds:
+  #
+  #     gap [4.0, 7.5) A   n=142   mean 0.257-0.270   max 0.49-0.56
+  #     gap [7.5, 8.0) A   n= 10   mean 0.318         max 0.839
+  #
+  # Every bin below 7.5 A is homogeneous; only the last is elevated, and it
+  # holds the one frame -- gap 7.761 A, 2.4x the monomer baseline and 1.5x the
+  # next worst in the whole dataset -- that entered at merge 7 and took the fit
+  # apart. Training error had held at 0.009 for eight iterations with a worst
+  # component of 0.039; the fit that first saw this frame reported 0.078 and
+  # 1.224, and validation RMSE went 0.051 -> 0.188. One target the model cannot
+  # represent is enough, because the dipole sigma is tight (0.01).
+  #
+  # 7.5 removes that bin and keeps everything that looks normal, at a cost of
+  # 10 frames in 180. Do not read 8.0 as merely unlucky: it was measured on the
+  # validation set alone, whose clusters are all at the top rung, and healthy
+  # gaps grow with cluster size -- so a threshold fitted there is systematically
+  # too permissive for the ladder that feeds it.
+  max_fragment_gap: 7.5
 
   # 20 molecules x 9 atoms. Farthest-point selection prefers the largest cluster
   # in the pool for the same reason it prefers a collapsed one -- nothing else

@@ -258,15 +258,26 @@ def test_a_gate_passes_the_dataset_by_reference_not_by_value(tmp_path):
         "frames": frames_to_payload([water(i) for i in range(200)]),
     }
 
+    # The fitted potential is the third payload with size, and the one that
+    # actually walled the runs: 26 MB for ethanol, and 5 MB and climbing for
+    # water, embedded in the sampling job's stored call.
+    fit_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fit_result = {
+        "iteration": 0, "n_train": 9,
+        "test_error": {"rmse_component": 0.1},
+        "potential": "x" * 300_000,
+    }
+
     response = convergence_gate.__wrapped__(
         dataset_uuid,
         test_set,
-        {"iteration": 0, "n_train": 9, "test_error": {"rmse_component": 0.1}},
+        fit_result,
         {"iteration": 0, "n_frames": 4, "errors": {"rmse_component": 0.9}},
         settings.as_dict(),
         0,
         [],
         test_set_uuid=test_set_uuid,
+        fit_uuid=fit_uuid,
     )
 
     assert response.replace is not None
@@ -276,9 +287,8 @@ def test_a_gate_passes_the_dataset_by_reference_not_by_value(tmp_path):
     # The same gate, handed the dataset itself: this is the shape that overflowed.
     by_value = convergence_gate.__wrapped__(
         big,
-        {"source": "generated", "n_frames": 4,
-         "frames": frames_to_payload([water(1)])},
-        {"iteration": 0, "n_train": 9, "test_error": {"rmse_component": 0.1}},
+        test_set,
+        fit_result,
         {"iteration": 0, "n_frames": 4, "errors": {"rmse_component": 0.9}},
         settings.as_dict(),
         0,
@@ -313,13 +323,25 @@ def test_a_gate_passes_the_dataset_by_reference_not_by_value(tmp_path):
 
     get_flow(response.replace)
 
-    # The dataset arrives through a loader keyed by that uuid, not by value.
+    # Each large input arrives through a loader keyed by its uuid, not by value.
     loaders = [
         job for job in response.replace.jobs
         if getattr(job, "function", None) is not None
         and getattr(job.function, "__name__", "") == "load_stored_output"
     ]
-    assert {job.function_args[0] for job in loaders} == {dataset_uuid, test_set_uuid}
+    assert {job.function_args[0] for job in loaders} == {
+        dataset_uuid, test_set_uuid, fit_uuid
+    }
+
+    # Nothing anywhere in the replacement is anywhere near the size of what was
+    # passed in -- the check that would have caught the potential, which the
+    # dataset-only version of this test did not.
+    biggest = max(
+        (len(json.dumps(jsanitize(j.function_args, strict=True))), j.name)
+        for node in response.replace.jobs
+        for j in (node.jobs if hasattr(node, "jobs") else [node])
+    )
+    assert biggest[0] < 100_000, f"{biggest[1]} carries {biggest[0]} bytes of arguments"
 
 
 def test_a_gate_still_accepts_a_dataset_passed_by_value(tmp_path):

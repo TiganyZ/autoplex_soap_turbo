@@ -1,0 +1,172 @@
+# Liquid water, 64 molecules: equilibrate, predict the IR spectrum, then bias it
+# toward the experimental one by each of the four estimators and compare them.
+#
+#   python workflows/water_ir_matching/run.py --dry-run
+#
+# NOTHING IS FITTED HERE. The potential and the dipole model are inputs. What
+# the flow measures is how far each biasing scheme moves the spectrum, and that
+# is bounded by the model: MAD redistributes intensity among the modes a
+# potential already has and cannot create one where there is none.
+
+name: water_ir_matching
+workdir: /scratch/project_2017844/anni_water/ir_matching
+
+# 64 molecules, 192 atoms, a 12.4295 A box. Small, and deliberately so: the
+# arms are seven MD runs of the same length, and this is the size at which all
+# seven fit in one allocation. Two consequences worth knowing.
+#
+#   * HALF THE CELL EDGE IS 6.21 A, and the energy model's soap_turbo cutoff is
+#     6.25 + 0.5 buffer = 6.75. So even without dispersion TurboGAP is past the
+#     minimum image and replicates the cell. It says so once, in a warning
+#     about "a neighbors cutoff sphere", and is correct either way -- but the
+#     512-molecule box (L = 31.32) is the one that does not need it.
+#   * THE DIPOLE MODEL'S CUTOFF IS 5.0 + 0.5 = 5.5, comfortably inside 6.21, so
+#     the dipole is a genuine minimum-image quantity here.
+start_structure: /scratch/project_2017844/anni_water/structures/atoms_water_64_molecules.xyz
+experiment: /scratch/project_2017844/anni_water/ir_spectrum_water_exp_downing.dat
+
+turbogap:
+  # TWO MODELS, COMPOSED BY THE FLOW'S FIRST STAGE rather than by hand. The
+  # energy model of a liquid has no dipole in it -- they are separate GAPs
+  # fitted to different targets -- and turboGAP reads exactly one potential
+  # file, so the dipole model's blocks are concatenated in carrying
+  # dipole_model = .true., which keeps them out of the energy and forces.
+  #
+  # Each keeps its own subdirectory under gap_files/. Both converters name
+  # their outputs after the descriptor type (alphas_soap_turbo_1.dat), so
+  # flattening them has one silently overwrite the other and the run proceeds
+  # with the wrong coefficients.
+  energy_gap: /scratch/project_2017844/anni_water/gap_files/water_vdw_gen6_g4.gap
+  dipole_gap: /scratch/project_2017844/anni_water/dipole_model/dipole.gap
+
+  species: [H, O]
+  masses: [1.008, 15.999]
+
+  # 0.25 fs, not 0.5. The O-H stretch at 3700 cm^-1 has a 9.0 fs period, so
+  # 0.5 fs gives it 18 points and 0.25 fs gives it 36. It also halves the
+  # y-bank tilt in the xl estimator, which is ~3.4% at 4000 cm^-1 at 0.5 fs
+  # (docs/mad_ir_matching.md 3.4) -- that cancels between arms, because every
+  # arm samples identically, but it does not cancel in an absolute spectrum,
+  # and the prediction stage produces one.
+  md_step: 0.25
+  thermostat: bussi
+  tau_t: 100.0
+  seed: 12345
+
+  # 192 atoms over 48 ranks is 4 atoms each, the same per-rank load the
+  # 512-molecule run carries on 768. Going wider does not help: past roughly
+  # one atom per rank the communication is the calculation.
+  ntasks: 48
+  executable: /projappl/project_2017844/turbogap_feature_ir/bin/turbogap
+
+  # srun, not mpirun: inside a Slurm allocation srun inherits the job's
+  # binding and cgroup, and OpenMPI's mpirun then has to be told everything
+  # Slurm already knows. ntasks_flag follows from the launcher's name.
+  mpirun: srun
+
+  # Tkatchenko-Scheffler dispersion. The model carries Hirshfeld volumes, but
+  # they are predicted and then DISCARDED unless vdw.type is set: "the potential
+  # has vdW in it" is not the same as "this run uses vdW". The compose stage
+  # refuses to continue if the vdW energy comes back exactly zero.
+  #
+  # The reference parameters are deliberately absent: turboGAP has built-in
+  # values for H, C, O and P (vdw.f90:get_vdw_ref_params), and omitting them
+  # uses exactly those. If you ever do override them, note the units --
+  # Angstrom, Angstrom^3 and eV*Angstrom^6, NOT the bohr-based units the
+  # keyword reference documents. The source settles it: it stores
+  # `alpha0 = 4.5d0*Bohr**3`, i.e. a value already in A^3.
+  #
+  # rcut 25 is turboGAP's default and is converged. Measured on this box, one
+  # frame: the vdW energy is -4.6165 eV at 6 A, -5.4523 at 15 and -5.4914 at
+  # 25, so the tail past 15 A is 0.7% of the term and the tail past 25 is
+  # nothing. It reaches well past the minimum image at this box size and
+  # TurboGAP replicates rather than truncating, which is correct and costs
+  # time; it does NOT crash. Job 848497 died at 25 A on 768 ranks inside UCX
+  # with 0.485 GB per rank, which is a decomposition problem, not this.
+  vdw:
+    type: ts
+    rcut: 25.0
+
+ir:
+  temperature: 300.0
+
+  # The starting box came from a different potential, so its structure is that
+  # potential's. Melting first destroys it; without this the production run
+  # samples someone else's minimum relaxing for as long as it lasts.
+  # 3 ps at 600 K, then 20 ps at 300 K.
+  #
+  # THE MELT, THE EQUILIBRATION AND THE DoS SAMPLING ALL RUN AGAINST THE
+  # ENERGY-ONLY POTENTIAL. Nothing in them reads a dipole -- the DoS is built
+  # from velocities and the prediction stage re-evaluates the dipole model on
+  # the trajectory afterwards -- and there is no keyword to switch a dipole
+  # off, because do_dipole is derived from whether any block carries
+  # dipole_model (turbogap_setup.f90:253). So the flow hands those stages a
+  # file that has none, and the compose stage checks that it has none.
+  melt_steps: 12000
+  melt_temperature: 600.0
+  equil_steps: 80000
+
+  # Uncomment to let the barostat find the potential's own density rather than
+  # the one the box was built at. Worth doing once per potential: this model
+  # equilibrates to 47.8 A^3/molecule against liquid water's 29.9, and neither
+  # the vdW references nor the cutoff explain it.
+  # npt:
+  #   barostat: berendsen
+  #   tau_p: 1000
+  #   pressure: 1
+
+  # Sampling for the density of states. The interval must be fine enough that
+  # Nyquist clears the O-H stretch: stride 8 at 0.25 fs is 2 fs frames, so
+  # 8339 cm^-1. 20 ps in 10000 frames, four windows of 5 ps -- and a window's
+  # length is the DoS resolution, 33.356/tau_ps = 6.7 cm^-1.
+  dospt_steps: 80000
+  dospt_stride: 8
+  dospt_windows: 4
+  dospt_executable: /projappl/project_2017844/dospt/bin/DoSPT
+
+  # Refuse to spend the rest of the flow on a configuration that is not water,
+  # or one still drifting. Set false to measure anyway and find out.
+  stop_if_not_equilibrated: true
+
+  # The observable.
+  nu_min: 400.0
+  nu_max: 4000.0
+  resolution: 35.0
+  lag_factor: 2
+  stride: 1
+  tau_mem: 300.0
+  n_modes: 101
+
+  # fft estimator only. quantum_correction is the setting most likely to
+  # surprise: "harmonic" is w(1-exp(-hbar w/kT)) and differs from the "classical"
+  # w^2 that acf and xl apply by a factor of 16 at 3400 cm^-1. It is a tilt
+  # across the range, so no fitted scale absorbs it.
+  quantum_correction: harmonic
+  acf_ratio: 0.2          # prediction, over the whole trajectory
+  acf_ratio_md: 0.5       # MD, over the rolling buffer; 1/lag_factor matches acf
+  smooth_k: 10
+
+  # Production arms: 40000 steps is 10 ps. The ensemble the estimator averages
+  # over is lag_factor/(resolution*md_step) frames wide -- 3812 here -- so the
+  # bias only starts acting after the first ~1 ps, and 10 ps leaves about five
+  # buffer-lengths of biased sampling after that. Halving md_step doubles the
+  # buffer in steps, which is why this is 40000 rather than the 20000 that the
+  # same physics needed at 0.5 fs.
+  arm_steps: 40000
+  arm_write_xyz: 2000
+  estimators: [acf_block, acf_exp, xl, fft]
+
+  # exp_energy_scales as a fraction of the system's THERMAL energy,
+  # (3/2) N kB T -- not of its cohesive energy. The restraint has to compete
+  # with thermal motion to move the structure; sizing it against |E_pot|
+  # instead is how a bias ends up larger than the entire thermal budget and
+  # dissociates the system while the dissimilarity falls obediently.
+  bias_target_kt: 0.5
+  bias: true
+
+md_worker:
+  worker: roihu
+  resources: {nodes: 1, partition: medium, time: "1-00:00:00"}
+
+analysis_worker:
+  worker: local

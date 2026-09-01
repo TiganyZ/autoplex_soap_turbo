@@ -208,3 +208,47 @@ def test_every_iteration_is_scored_on_the_same_validation_set(
 
     assert summary["n_validation_frames"] == 4
     assert all(row["n_validation"] == 4 for row in summary["validation"])
+
+
+def test_the_loader_says_where_it_has_to_run_when_it_cannot_reach_the_store(
+    monkeypatch,
+):
+    """The failure mode of the one job that has to run on the runner.
+
+    ``load_stored_output`` reads a previous job's output back out of the job
+    store. Under jobflow-remote the store a job is handed is a StdJSONStore over
+    two files in its run directory, not the database, so the real store has to
+    be rebuilt from the project configuration -- which exists only on the
+    machine hosting the project. Give this job a worker elsewhere and the lookup
+    returns nothing, which on its own would read as "the dataset is missing"
+    rather than "this is running in the wrong place".
+    """
+    from jobflow import CURRENT_JOB
+
+    class EmptyStore:
+        """What a worker's store looks like: it knows about no other job."""
+
+        def get_output(self, uuid, load=False):
+            raise ValueError(f"UUID: {uuid} has no outputs.")
+
+    monkeypatch.setattr(CURRENT_JOB, "store", EmptyStore(), raising=False)
+    monkeypatch.setitem(
+        __import__("sys").modules, "jobflow_remote.config", None
+    )
+
+    with pytest.raises(ValueError, match="runner"):
+        flow_module._stored_output("2b0ad0f2-0000-0000-0000-000000000000")
+
+
+def test_the_loader_prefers_the_store_it_was_given(monkeypatch):
+    """Run locally there is no project, and the exposed store is the real one."""
+    from jobflow import CURRENT_JOB
+
+    payload = {"frames": {"train": [], "test": []}, "n_train": 3}
+
+    class RealStore:
+        def get_output(self, uuid, load=False):
+            return payload
+
+    monkeypatch.setattr(CURRENT_JOB, "store", RealStore(), raising=False)
+    assert flow_module._stored_output("whatever") is payload

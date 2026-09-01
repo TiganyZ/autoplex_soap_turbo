@@ -169,6 +169,7 @@ def prepare_md_directory(
     # turboGAP needs a box even for an isolated molecule; the boundary
     # conditions are what say it is not a crystal.
     structure.set_pbc(not settings.non_periodic)
+    drop_dead_velocities(structure)
     write_dataset(directory / "atoms.xyz", [structure])
 
     write_turbogap_input(
@@ -180,6 +181,42 @@ def prepare_md_directory(
         extra_keywords=settings.merged_keywords(),
     )
     return directory
+
+
+def drop_dead_velocities(structure: Atoms) -> bool:
+    """Remove an all-zero velocity array, returning whether there was one.
+
+    A structure that came out of a turboGAP *relaxation* carries a full
+    ``velocities`` column of zeros, because gradient descent has no velocities
+    and writes the array anyway. Feed that straight into a thermostatted run and
+    the thermostat rescales the existing kinetic energy toward its target --
+    ``sqrt(T_target / T_current)`` with ``T_current`` exactly zero -- so the
+    velocities are NaN from the first step.
+
+    What that looks like from outside is the part worth knowing. The positions
+    stay finite for a while, so the potential energy in ``thermo.log`` is a real
+    number and only the temperature column is NaN; turboGAP keeps running,
+    writes a trajectory, and exits 0. It reads as a diverging simulation rather
+    than as an initial condition that was never valid.
+
+    Dropping the array leaves turboGAP to draw its own Maxwell-Boltzmann
+    velocities at ``t_beg``, which is what an equilibration wants in any case.
+    A structure carrying real velocities is left alone -- continuing a walk from
+    where it stopped is a legitimate thing to do.
+    """
+    velocities = structure.arrays.get("velocities")
+    if velocities is None or np.any(velocities):
+        return False
+    structure.arrays.pop("velocities")
+    # `temperature` alongside it is the relaxation's own zero, and is equally
+    # not an initial condition.
+    if structure.info.get("temperature") == 0.0:
+        structure.info.pop("temperature", None)
+    logger.info(
+        "dropped an all-zero velocity array from the starting structure; "
+        "turboGAP will draw its own at t_beg"
+    )
+    return True
 
 
 def run_turbogap_md(directory: str | Path, settings: TurbogapMDSettings) -> Path:

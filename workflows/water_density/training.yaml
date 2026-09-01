@@ -180,6 +180,13 @@ selection:
   # Below water's O-H bond at 0.96 A. Applied to the whole frame, so it has to
   # clear the shortest *bond*, not the shortest intermolecular contact.
   min_separation: 0.80
+  # 0.80 has to sit below the 0.96 A O-H bond, and so cannot see two water
+  # molecules pushed into one another. This does: 2.4 A is well below the
+  # 2.8 A first-shell O-O peak and well above the jammed geometries that a
+  # packed-but-unrelaxed batch produces. 96% of one such batch sat below 2.2 A,
+  # against none of the equilibrated data, and DFT converged all of it.
+  min_pair_separation:
+    "O-O": 2.4
 
   # 20 molecules x 3 atoms.
   max_atoms: 60

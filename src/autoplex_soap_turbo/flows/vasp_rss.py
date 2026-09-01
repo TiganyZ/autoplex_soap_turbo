@@ -177,17 +177,9 @@ def vasp_rss_flow(settings: VaspRssConfig, **overrides):
     # dynamic=True carries it into everything the job replaces itself with.
     apply_worker(flow, settings.general)
     if settings.vasp.worker:
-        flow.update_config(
-            {"manager_config": _manager_config(settings.vasp)},
-            name_filter="static",
-            dynamic=True,
-        )
+        apply_worker(flow, settings.vasp, name_filter="static")
     if settings.fit.worker:
-        flow.update_config(
-            {"manager_config": _manager_config(settings.fit)},
-            name_filter="machine_learning_fit",
-            dynamic=True,
-        )
+        apply_worker(flow, settings.fit, name_filter="machine_learning_fit")
 
     logger.info(
         "built RSS flow '%s': VASP on %s, fitting on %s",
@@ -198,13 +190,18 @@ def vasp_rss_flow(settings: VaspRssConfig, **overrides):
     return flow
 
 
-def _manager_config(settings: WorkerSettings) -> dict:
-    """The jobflow-remote manager_config for a worker assignment."""
-    manager: dict = {}
-    if settings.worker:
-        manager["worker"] = settings.worker
-    if settings.exec_config:
-        manager["exec_config"] = settings.exec_config
-    if settings.resources:
-        manager["resources"] = dict(settings.resources)
-    return manager
+def describe(flow, settings: VaspRssConfig) -> None:
+    """Print what the RSS flow will do, before anything is submitted.
+
+    The INCAR line is the point of it: ``rss_config.yaml``'s ``custom_incar``
+    is merged over the defaults just before submission, so the values that will
+    actually be used are not readable from either file alone.
+    """
+    incar = settings.effective_incar()
+    print(f"\nflow: {settings.name}")
+    print(f"  RSS configuration: {settings.resolve(settings.rss_config_file)}")
+    print(f"  VASP worker      : {settings.vasp.worker or '(project default)'}")
+    print(f"  fitting worker   : {settings.fit.worker or '(project default)'}")
+    print(f"  ENCUT / KSPACING : {incar['ENCUT']} / {incar['KSPACING']}")
+    print("                     (rss_config.yaml custom_incar has the last word)")
+    print()

@@ -219,6 +219,20 @@ class FitSettings(WorkerSettings):
     #: ``cpus_per_task`` equal to ``num_processes``, or srun will not have the
     #: tasks to place.
     mpi_ranks: int | None = None
+    #: How many models to fit per iteration, for the committee uncertainty.
+    #:
+    #: 1 disables it. Above 1, that many extra fits are run on the same data and
+    #: their disagreement becomes the acquisition score for
+    #: ``selection.method: uncertainty``. The members differ because
+    #: ``sparse_method=cur_points`` selects a different sparse set every run, so
+    #: no resampling is needed -- but that also means a committee is meaningless
+    #: for a deterministic sparse method such as ``uniform``.
+    #:
+    #: 8 members gave a rank correlation of 0.59 against the true error on held-
+    #: out water, and 5.2x enrichment over random in the worst ten. Each member
+    #: costs a full fit, so this multiplies the fitting time of every iteration.
+    committee_size: int = 1
+
     default_dipole_sigma: float = 0.01
     default_sigma: list[float] = field(default_factory=lambda: [0.001, 0.1, 0.1, 0.1])
     e0: dict[str, float] | None = None
@@ -473,7 +487,23 @@ class SelectionSettings:
     on top whatever this says.
     """
 
+    #: How the candidates worth a reference calculation are chosen.
+    #:
+    #: ``fps``          farthest-point on the pair-distribution fingerprint
+    #: ``random``       a control, for measuring whether selection helps at all
+    #: ``uncertainty``  the frames a committee of fits disagrees most about,
+    #:                  then farthest-point within that shortlist
+    #:
+    #: ``uncertainty`` needs ``fit.committee_size`` above 1: it is scored by
+    #: refitting the model several times and comparing their predictions,
+    #: because QUIP gives no sparse-GPR variance for a dipole model.
     method: str = "fps"
+
+    #: How many of the most uncertain candidates the diversity step chooses
+    #: from, as a multiple of ``n_select``. Ranking on uncertainty alone brings
+    #: back several views of one unusual configuration.
+    uncertainty_shortlist: float = 3.0
+
     min_separation: float | None = None
 
     #: Widest gap, in Angstrom, a structure may contain before it is treated as
@@ -509,10 +539,66 @@ class SelectionSettings:
     #: be right about first. ``None`` means no cap.
     max_atoms: int | None = None
 
+    #: Closest approach permitted between named pairs of elements, in
+    #: Angstrom, written ``"O-O": 2.4``. Empty means no pair is checked.
+    #:
+    #: ``min_separation`` above cannot do this. It thresholds *every*
+    #: interatomic distance with one number, so for a molecular system that
+    #: number must sit below the shortest intramolecular bond -- 0.80 A for
+    #: water, because of the 0.96 A O-H -- and a threshold that low cannot see
+    #: two molecules jammed together. A round-2 batch here went to DFT with 96%
+    #: of its frames at an O-O below 2.2 A against 0% of the equilibrated data,
+    #: passed every check in place at the time, and converged without complaint.
+    #: DFT is happy to answer questions about geometries the liquid never
+    #: visits; the model then spends its capacity on them.
+    #:
+    #: There is no default, and deliberately so: the right floor is a property
+    #: of the chemistry. 2.4 A is right for water O-O and would throw away most
+    #: of a covalent solid.
+    #:
+    #: Name a pair that is *never bonded*. The measurement is over every pair of
+    #: those two elements in the frame, intramolecular ones included, so an
+    #: ``"O-H": 1.4`` on water rejects every configuration it is given -- the
+    #: 0.96 A bond inside each molecule is an O-H pair. For water and for
+    #: ethanol that leaves ``O-O``, which is exactly the contact that matters.
+    min_pair_separation: dict[str, float] = field(default_factory=dict)
+
     n_select: int = 20
     r_cut: float = 6.0
     n_bins: int = 40
     sigma: float = 0.2
+
+    def __post_init__(self):
+        allowed = {"fps", "random", "uncertainty"}
+        if self.method not in allowed:
+            raise ConfigError(
+                f"selection.method is {self.method!r}; expected one of "
+                f"{sorted(allowed)}"
+            )
+        for key, floor in self.min_pair_separation.items():
+            if not isinstance(key, str) or key.count("-") != 1 or not all(
+                part.strip() for part in key.split("-")
+            ):
+                raise ConfigError(
+                    f"selection.min_pair_separation key {key!r} is not a pair "
+                    'of elements; write it as "O-O" or "O-H"'
+                )
+            if not isinstance(floor, (int, float)) or floor <= 0:
+                raise ConfigError(
+                    f"selection.min_pair_separation[{key!r}] is {floor!r}; "
+                    "expected a positive distance in Angstrom"
+                )
+
+    def pair_separations(self) -> dict[tuple[str, str], float]:
+        """``min_pair_separation`` in the tuple-keyed form the filter takes.
+
+        YAML has no tuple keys, so the settings file spells a pair ``"O-O"``
+        and this is where that becomes ``("O", "O")``.
+        """
+        return {
+            tuple(part.strip() for part in key.split("-")): float(floor)
+            for key, floor in self.min_pair_separation.items()
+        }
 
 
 @dataclass
@@ -611,6 +697,21 @@ class TrainingConfig:
 
     #: Directory the relative paths in this file are resolved against.
     root: Path = field(default_factory=Path.cwd)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TrainingConfig:
+        """Rebuild these settings from the dict form a job received them in.
+
+        Settings cross a job boundary as plain data -- jobflow serialises every
+        argument -- so a job that needs the object rather than the mapping
+        rebuilds it here. This is the counterpart of :meth:`as_dict`, and the
+        first line of almost every job in ``flows/iterative_dipole.py``.
+
+        Unlike :meth:`from_file` it does not re-validate: the settings were
+        validated when they were loaded on the submitting machine, and some of
+        the checks read files that do not exist on a worker.
+        """
+        return cls(**rehydrate(data))
 
     @classmethod
     def from_file(cls, path: str | Path) -> TrainingConfig:
@@ -816,6 +917,17 @@ class TrainingConfig:
             problems.append(f"iterations must be at least 1, got {self.iterations}")
         if not self.species_list:
             problems.append("species_list is empty")
+
+        # Uncertainty selection scores candidates by disagreement between fits,
+        # so with one fit there is nothing to disagree. Refused rather than
+        # quietly falling back to farthest-point: the run would complete, cost
+        # the same DFT, and the log would be the only place it said so.
+        if self.selection.method == "uncertainty" and self.fit.committee_size < 2:
+            problems.append(
+                "selection.method is 'uncertainty' but fit.committee_size is "
+                f"{self.fit.committee_size}. A committee needs at least 2 "
+                "members; each one is a full extra fit per iteration."
+            )
         if not 0.0 < self.dataset.train_fraction < 1.0:
             problems.append(
                 f"dataset.train_fraction must be in (0, 1), got {self.dataset.train_fraction}"
@@ -1043,3 +1155,30 @@ class TrainingConfig:
         data = asdict(self)
         data["root"] = str(self.root)
         return data
+
+
+def rehydrate(config: dict) -> dict:
+    """Rebuild a :class:`TrainingConfig`'s constructor arguments from a dict.
+
+    The settings travel to every worker as plain data, so the nested sections
+    come back as dictionaries and have to be turned into their dataclasses
+    again. Prefer :meth:`TrainingConfig.from_dict`, which wraps this.
+    """
+    models = {
+        "dataset": DatasetSettings,
+        "aims": AimsSettings,
+        "vasp": VaspSettings,
+        "fit": FitSettings,
+        "energy_fit": EnergyFitSettings,
+        "sampling": SamplingSettings,
+        "selection": SelectionSettings,
+        "validation": ValidationSettings,
+    }
+    data = dict(config)
+    for key, model in models.items():
+        value = data.get(key)
+        if isinstance(value, dict):
+            data[key] = model(**value)
+    if "root" in data:
+        data["root"] = Path(data["root"])
+    return data

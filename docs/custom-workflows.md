@@ -9,6 +9,15 @@ Everything here is the machinery the shipped workflows are themselves built
 from. There is no plugin layer to learn — a custom workflow is a Python file
 that assembles the same jobs.
 
+To start from a working skeleton rather than a blank file:
+
+```bash
+python scripts/new_workflow.py my_protocol --species Li F --flow custom
+```
+
+which writes a `flow.py` with one job and one flow builder already obeying the
+four rules below, and a `run.py` already wired to the shared front end.
+
 ---
 
 ## 1. Which level do you actually need?
@@ -487,8 +496,20 @@ In the order they get cheaper to fix:
 ```bash
 ./autoplex_venv/bin/python -m pytest tests/ -q   # everything
 python workflows/<yours>/run.py --dry-run        # shape, names, workers
+python workflows/<yours>/run.py --stub           # run it here, seconds
 python workflows/<yours>/run.py --local          # run it here, small settings
 ```
+
+`--stub` is the one worth reaching for first. It replaces the fit, the sampler
+and the reference stage with functions returning the same shapes
+(`src/autoplex_soap_turbo/stubs.py`) and runs everything between them for real,
+into an in-memory job store — so it exercises the payload routing, every
+serialisation boundary, and a gate resolving through its own replacements,
+without gap_fit, turboGAP or DFT. `examples/minimal/` is the worked example.
+
+A workflow that builds its own flow gets `--stub` by giving its `Workflow` a
+`stub=` context manager; one that does not refuses the flag rather than
+pretending to run.
 
 For a stage, four tests earn their place:
 

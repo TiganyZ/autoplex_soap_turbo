@@ -226,11 +226,13 @@ def salvage_tree(
     require_polarizability: bool = True,
     species: Sequence[str] | None = None,
 ) -> tuple[list[Atoms], list[SalvageSkip]]:
-    """Every recoverable calculation under ``root``, and every one that was not.
+    """Every recoverable FHI-aims calculation under ``root``, and every one not.
 
-    Directories are visited in sorted order so that two runs over the same tree
-    produce the same dataset in the same order -- which is what makes a
-    downstream selection reproducible.
+    The sweep itself is code-agnostic and lives in
+    :func:`autoplex_soap_turbo.data.builder.build_dataset`, which also groups by
+    settings, drops resubmitted duplicates and writes the training set. This is
+    the aims-only view of it, kept because it is what
+    ``scripts/salvage_aims_data.py`` and the tests call.
 
     ``species`` restricts the sweep to frames built only from those elements,
     and passing it is strongly advised. A worker's run directory is shared by
@@ -241,35 +243,18 @@ def salvage_tree(
     the frames are valid, they carry dipoles, and a fit would have happily
     learned one model for two unrelated chemistries.
     """
-    root = Path(root)
-    frames: list[Atoms] = []
-    skipped: list[SalvageSkip] = []
+    from autoplex_soap_turbo.data.builder import build_dataset  # noqa: PLC0415
 
-    candidates = sorted(
-        {path.parent for name in ("aims.out", "aims.out.gz")
-         for path in root.rglob(name)}
+    result = build_dataset(
+        [root],
+        backend_name="aims",
+        species=species,
+        allow_mixed_settings=True,
+        require_polarizability=require_polarizability,
+        dipole_key=dipole_key,
+        polarizability_key=polarizability_key,
+        # This function has always returned every recoverable frame, and
+        # callers of it do their own novelty filtering afterwards.
+        deduplicate=False,
     )
-    logger.info("found %d FHI-aims directories under %s", len(candidates), root)
-
-    wanted = set(species) if species else None
-
-    for directory in candidates:
-        try:
-            frame = salvage_directory(
-                directory,
-                dipole_key=dipole_key,
-                polarizability_key=polarizability_key,
-                require_polarizability=require_polarizability,
-            )
-            present = set(frame.get_chemical_symbols())
-            if wanted is not None and not present <= wanted:
-                raise ValueError(
-                    f"contains {', '.join(sorted(present - wanted))}, which is "
-                    f"not in the requested species {sorted(wanted)}"
-                )
-            frames.append(frame)
-        except Exception as exc:  # noqa: BLE001 - a bad directory must not stop the sweep
-            skipped.append(SalvageSkip(str(directory), str(exc)))
-
-    logger.info("salvaged %d frames, skipped %d", len(frames), len(skipped))
-    return frames, skipped
+    return result.frames, result.skipped
