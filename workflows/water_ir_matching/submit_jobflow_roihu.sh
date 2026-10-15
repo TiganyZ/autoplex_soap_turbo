@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --account=project_2017844
+#SBATCH --account=project_2006384
 #SBATCH --partition=medium
 #SBATCH --nodes=1
 #SBATCH --ntasks=48
@@ -29,7 +29,7 @@
 # The environment notes in submit_roihu.sh apply here too and are not repeated.
 set -euo pipefail
 
-ROOT=/projappl/project_2017844/autoplex_soap_turbo_ir
+ROOT=/projappl/project_2006384/zarrout1/autoplex_soap_turbo_ir
 CONFIG="${1:-$ROOT/workflows/water_ir_matching/config.yaml}"
 shift || true
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/workflows/water_ir_matching/$CONFIG" ;; esac
@@ -42,7 +42,7 @@ module load gcc/15.2.0 openmpi/5.0.10 openblas/0.3.30
 eval "$_u"
 
 # jobflow lives in the autoplex venv, not in the python-data module.
-VENV=/scratch/project_2017844/gap_calculations/autoplex_venv
+VENV=/scratch/project_2006384/zarrout1/gap_calculations/autoplex_venv
 PY=$VENV/bin/python
 
 echo "host    : $(hostname)"

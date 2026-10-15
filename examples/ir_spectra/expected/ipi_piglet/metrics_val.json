@@ -1,0 +1,110 @@
+{
+  "plotted": "harmonic",
+  "frames": {
+    "classical/r119": 1000,
+    "piglet/r119": 1000
+  },
+  "arms": {
+    "classical/r119": {
+      "mismatch": 0.7646540902978517,
+      "centroid": 3540.7049610183885,
+      "n_competing": 1,
+      "libration": 0.36622281689891206,
+      "HOH bend": 0.06305204177761664,
+      "assoc./comb.": 0.04080990522548941,
+      "OH stretch": 0.28723259594366646
+    },
+    "piglet/r119": {
+      "mismatch": 0.8976367374357036,
+      "centroid": 3282.2764623979633,
+      "n_competing": 1,
+      "libration": 0.33608273222556573,
+      "HOH bend": 0.06926829249312978,
+      "assoc./comb.": 0.12072624384652532,
+      "OH stretch": 0.15042995805365011
+    }
+  },
+  "downing": {
+    "mismatch": 0.0,
+    "centroid": 3367.5597799419515,
+    "n_competing": 1,
+    "libration": 0.21395223619722054,
+    "HOH bend": 0.047347581703323295,
+    "assoc./comb.": 0.015541517435801195,
+    "OH stretch": 0.6868297028662055
+  },
+  "all_prefactors": {
+    "harmonic/classical/r119": {
+      "mismatch": 0.7646540902978517,
+      "centroid": 3540.7049610183885,
+      "n_competing": 1,
+      "libration": 0.36622281689891206,
+      "HOH bend": 0.06305204177761664,
+      "assoc./comb.": 0.04080990522548941,
+      "OH stretch": 0.28723259594366646
+    },
+    "harmonic/piglet/r119": {
+      "mismatch": 0.8976367374357036,
+      "centroid": 3282.2764623979633,
+      "n_competing": 1,
+      "libration": 0.33608273222556573,
+      "HOH bend": 0.06926829249312978,
+      "assoc./comb.": 0.12072624384652532,
+      "OH stretch": 0.15042995805365011
+    },
+    "classical/classical/r119": {
+      "mismatch": 0.7013152100769604,
+      "centroid": 3581.0595876989137,
+      "n_competing": 1,
+      "libration": 0.13169868601866347,
+      "HOH bend": 0.0510380264179167,
+      "assoc./comb.": 0.0410648926273678,
+      "OH stretch": 0.4881858732546301
+    },
+    "classical/piglet/r119": {
+      "mismatch": 0.8501443035957185,
+      "centroid": 3364.670735221457,
+      "n_competing": 1,
+      "libration": 0.13545353510768415,
+      "HOH bend": 0.06333376392122238,
+      "assoc./comb.": 0.14554754456905092,
+      "OH stretch": 0.2756879451533695
+    },
+    "linear/classical/r119": {
+      "mismatch": 0.7744122808567491,
+      "centroid": 3540.7047365171043,
+      "n_competing": 1,
+      "libration": 0.3821509555709548,
+      "HOH bend": 0.06145044905639628,
+      "assoc./comb.": 0.039755576300504976,
+      "OH stretch": 0.2797841926498928
+    },
+    "linear/piglet/r119": {
+      "mismatch": 0.9015514396751104,
+      "centroid": 3282.275685629631,
+      "n_competing": 1,
+      "libration": 0.35731637739031774,
+      "HOH bend": 0.06703613125092692,
+      "assoc./comb.": 0.11676591544553043,
+      "OH stretch": 0.1454874744994847
+    },
+    "none/classical/r119": {
+      "mismatch": 0.9473697401554723,
+      "centroid": 3497.4195052664963,
+      "n_competing": 1,
+      "libration": 0.7299676259527322,
+      "HOH bend": 0.03835504380281456,
+      "assoc./comb.": 0.0200154917479591,
+      "OH stretch": 0.08264377035805957
+    },
+    "none/piglet/r119": {
+      "mismatch": 0.9697589548817684,
+      "centroid": 3203.234012248996,
+      "n_competing": 0,
+      "libration": 0.7138568710020784,
+      "HOH bend": 0.03739583659864421,
+      "assoc./comb.": 0.048977799709656065,
+      "OH stretch": 0.04010460030717185
+    }
+  }
+}

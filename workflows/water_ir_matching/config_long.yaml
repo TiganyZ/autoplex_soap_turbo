@@ -53,13 +53,13 @@
 # See config.yaml for what every key means.
 
 name: water_ir_matching_long
-workdir: /scratch/project_2017844/anni_water/ir_matching_long
-start_structure: /scratch/project_2017844/anni_water/structures/atoms_water_64_molecules.xyz
-experiment: /scratch/project_2017844/anni_water/ir_spectrum_water_exp_downing.dat
+workdir: /scratch/project_2006384/zarrout1/anni_water/ir_matching_long
+start_structure: /scratch/project_2006384/zarrout1/anni_water/structures/atoms_water_64_molecules.xyz
+experiment: /scratch/project_2006384/zarrout1/anni_water/ir_spectrum_water_exp_downing.dat
 
 turbogap:
-  energy_gap: /scratch/project_2017844/anni_water/gap_files/water_vdw_gen6_g4.gap
-  dipole_gap: /scratch/project_2017844/anni_water/dipole_model/dipole.gap
+  energy_gap: /scratch/project_2006384/zarrout1/anni_water/gap_files/water_vdw_gen6_g4.gap
+  dipole_gap: /scratch/project_2006384/zarrout1/anni_water/dipole_model/dipole.gap
   species:
   - H
   - O
@@ -78,7 +78,7 @@ turbogap:
   # thermalise + DoS back to back -- 104000 steps, ~3.5 h -- which is what the
   # 8 h walltime below is sized for.
   ntasks: 16
-  executable: /projappl/project_2017844/turbogap_feature_ir/bin/turbogap
+  executable: /projappl/project_2006384/zarrout1/turbogap_feature_ir/bin/turbogap
 
   # srun, not mpirun: inside a Slurm allocation srun inherits the job's binding
   # and cgroup, and OpenMPI's mpirun then has to be told everything Slurm
@@ -108,13 +108,25 @@ ir:
   dospt_steps: 40000
   dospt_stride: 8
   dospt_windows: 4
-  dospt_executable: /projappl/project_2017844/dospt/bin/DoSPT
+  dospt_executable: /projappl/project_2006384/zarrout1/dospt/bin/DoSPT
 
   # Now that the equilibration is 10 ps, a failure here is worth stopping for.
   stop_if_not_equilibrated: true
 
   nu_min: 400.0
-  nu_max: 4000.0
+  # 5000, not 4000. These bounds select which EXPERIMENTAL points enter the
+  # loss (mad_ir.f90:mad_ir_select_range), and the Downing data ends at 3993,
+  # so raising the ceiling adds nothing to the fit. What it changes is the
+  # spectrum that gets written and looked at.
+  #
+  # Measured: this model's OH stretch peaks at 3638 cm^-1 with a FWHM of about
+  # 690, so at 4000 the band is still at 30% of its peak and 12% of it lies
+  # above the cutoff entirely. A plot made at 4000 shows a band cut off
+  # mid-slope, and any band integral taken there understates the model's
+  # stretch by roughly 14% while the experiment -- which has no intensity above
+  # ~3800 -- loses nothing. Nyquist at a 2 fs frame interval is 8339 cm^-1, so
+  # there is plenty of room.
+  nu_max: 5000.0
   resolution: 35.0
 
   # 3, not 2. The buffer is lag_factor*c/(resolution*md_step) = 11439 frames
@@ -125,7 +137,21 @@ ir:
 
   tau_mem: 300.0
   n_modes: 101
-  quantum_correction: harmonic
+  # "classical" (w^2), NOT ir_fft.f90's own "harmonic" default.
+  #
+  # mad_ir.f90 -- the acf and xl arms -- applies ir_nu_power, default 2, i.e.
+  # w^2. ir_fft.f90 defaults to w(1 - exp(-hbar w/kT)). The two differ by a
+  # factor of 16 at 3400 cm^-1 and agree only below ~208 cm^-1, and it is a
+  # TILT across the range, so the least-squares scale each arm fits against
+  # experiment does not absorb it. Left at "harmonic" the fft arm and the acf
+  # arms are not measuring the same thing, and comparing their dissimilarities
+  # -- which is what running four estimators is for -- is meaningless.
+  #
+  # Measured on liquid water: the choice moves one dipole model's relative
+  # mismatch from 0.841 to 0.633, larger than the difference between the models
+  # the comparison exists to rank. arm_pairs() now refuses a mixed-family run
+  # under any other setting. See docs/water-dipole-training.md Part 7.
+  quantum_correction: classical
   acf_ratio: 0.2
   acf_ratio_md: 0.5
   smooth_k: 10
@@ -182,7 +208,7 @@ ir:
   # thermalise_steps above pays that cost once instead of inside every arm. If
   # the arms are still hot in the report, the next lever is a third mode with
   # lambda ~ 2e-3 fs^-1, which costs ~1 cm^-1 more width inside the band.
-  gle_a_file: /scratch/project_2017844/anni_water/gle/gle_A.dat
+  gle_a_file: /scratch/project_2006384/zarrout1/anni_water/gle/gle_A.dat
 
   bias_target_kt: 0.5
   bias: true

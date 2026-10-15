@@ -28,18 +28,22 @@ COLUMNS = ("step", "move", "accepted", "e_trial", "e_current", "n_trial", "speci
 
 def read_log(path: Path) -> list[dict]:
     rows = []
+    # With an experimental observable, E_exp_trial and E_exp_current come first.
+    n_trial_column = 5
     for line in path.read_text().splitlines():
-        if line.startswith("#") or not line.strip():
+        if line.startswith("#"):
+            if "E_exp_trial" in line:
+                n_trial_column = 7
             continue
         parts = line.split()
-        if len(parts) < 6:
+        if len(parts) <= n_trial_column:
             continue
         rows.append({
             "move": parts[1],
             "accepted": parts[2] == "T",
             "e_trial": float(parts[3]),
             "e_current": float(parts[4]),
-            "n_trial": int(parts[5]),
+            "n_trial": int(parts[n_trial_column]),
         })
     return rows
 

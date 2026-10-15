@@ -7,7 +7,7 @@ not on the same machine.
 On the cluster that ran FHI-aims::
 
     python scripts/salvage_aims_data.py harvest \
-        --root /scratch/project_2017844/gap_calculations/run/aims \
+        --root /scratch/project_2006384/zarrout1/gap_calculations/run/aims \
         -o salvaged.xyz
 
 On whichever machine holds the training set::
@@ -72,6 +72,31 @@ def _harvest(args: argparse.Namespace) -> None:
 
     if not frames:
         raise SystemExit("nothing to write")
+
+    if args.box:
+        # A molecular FHI-aims run has no cell, so geometry.in carries none and
+        # the frames come out of the salvage without a Lattice. QUIP's reader
+        # requires one -- gap_fit aborts with "Cannot extract lattice from
+        # line Properties=..." -- so a training set assembled from these is
+        # unusable until a cell is supplied. It has to match the convention the
+        # rest of the set uses (40 A here, from the flow's `box:` setting), and
+        # the cluster is centred in it so that no atom is within a descriptor
+        # cutoff of a periodic image: a 15 A cluster in a 40 A cell leaves 25 A
+        # between images against a 5.5 A cutoff.
+        import numpy as np  # noqa: PLC0415
+        for a in frames:
+            pos = a.get_positions()
+            extent = pos.max(axis=0) - pos.min(axis=0)
+            if extent.max() + 2.0 * 5.5 > args.box:
+                raise SystemExit(
+                    f"a cluster spans {extent.max():.1f} A, which does not "
+                    f"leave a descriptor cutoff of clearance in a {args.box} A "
+                    "box. Raise --box."
+                )
+            a.set_cell(np.eye(3) * args.box)
+            a.set_pbc(True)
+            a.set_positions(pos - pos.mean(axis=0) + args.box / 2.0)
+        print(f"  set a {args.box} A cubic cell and centred each cluster in it")
 
     sizes = collections.Counter(len(a) for a in frames)
     print(f"  sizes: {dict(sorted(sizes.items()))}")
@@ -168,9 +193,16 @@ def _merge(args: argparse.Namespace) -> None:
         fraction=args.fraction,
         max_select=args.max_select,
     )
-    print(
-        f"  novelty threshold {report['threshold']:.4g} ({report['threshold_from']})"
-    )
+    if report["threshold"] is None:
+        # Nothing survived the filters above, so there was no reference set to
+        # calibrate a novelty threshold from. Say so rather than formatting
+        # None, which is a TypeError and reads like a bug in the salvage.
+        print("  novelty threshold not computed: no candidates reached this step")
+    else:
+        print(
+            f"  novelty threshold {report['threshold']:.4g} "
+            f"({report['threshold_from']})"
+        )
     print(f"  {len(novel)} of {len(kept)} are new configurations")
 
     if novel:
@@ -212,6 +244,12 @@ def main() -> None:
                               "calculations -- which are valid, carry dipoles, "
                               "and would be fitted as if they were the same "
                               "chemistry.")
+    harvest.add_argument("--box", type=float, default=None, metavar="A",
+                         help="give each frame a cubic cell of this edge and "
+                              "centre the cluster in it. Molecular FHI-aims "
+                              "runs have no cell, and gap_fit refuses frames "
+                              "without a Lattice; match the training set's own "
+                              "convention (40 for this campaign)")
     harvest.add_argument("--allow-missing-polarizability", action="store_true",
                          help="keep frames whose DFPT response did not finish")
     harvest.set_defaults(func=_harvest)
@@ -240,8 +278,19 @@ def main() -> None:
                             "this, i.e. that have evaporated a piece. A "
                             "detached fragment is invisible to the descriptor "
                             "yet still carries dipole.")
+    # NOT a general default: 1.2 A suits an ionic solid like LiF, whose
+    # shortest contact is a ~2 A Li-F. `drop_collapsed` thresholds EVERY
+    # interatomic distance with this one number, so for a molecular system it
+    # has to sit below the shortest BOND -- 0.96 A for water's O-H -- or it
+    # rejects every frame, which is exactly what it did to a batch of 33 water
+    # clusters whose compressed O-H reached 0.813 A under a quantum thermostat.
+    # tests/test_close_contacts.py makes the same point. For water pass
+    # --min-separation 0.75 and rely on the species-aware drop_close_contacts,
+    # which knows an O-O of 1.9 A is wrong and an O-H of 0.85 A is not.
     merge.add_argument("--min-separation", type=float, default=1.2,
-                       help="reject frames with atoms closer than this")
+                       help="reject frames with atoms closer than this; must "
+                            "be below the shortest bond in the system "
+                            "(water: 0.75, not the 1.2 default)")
     merge.set_defaults(func=_merge)
 
     args = parser.parse_args()

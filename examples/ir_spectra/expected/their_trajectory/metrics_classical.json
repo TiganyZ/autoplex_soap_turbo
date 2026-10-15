@@ -1,0 +1,107 @@
+{
+  "plotted": "harmonic",
+  "nuclei": "classical",
+  "arms": {
+    "r119": {
+      "mismatch": 0.6843749848276304,
+      "centroid": 3536.3649257072434,
+      "n_competing": 1,
+      "libration": 0.34618325082439305,
+      "HOH bend": 0.04163774322243839,
+      "assoc./comb.": 0.02332980602370382,
+      "OH stretch": 0.4932346948582499
+    },
+    "tensoap": {
+      "mismatch": 0.8097675357781052,
+      "centroid": 3531.6359944488318,
+      "n_competing": 1,
+      "libration": 0.5478835124846334,
+      "HOH bend": 0.03943959157340621,
+      "assoc./comb.": 0.02258475547231106,
+      "OH stretch": 0.30063298371365427
+    }
+  },
+  "downing": {
+    "mismatch": 0.0,
+    "centroid": 3367.5597799419515,
+    "n_competing": 1,
+    "libration": 0.21395223619722054,
+    "HOH bend": 0.047347581703323295,
+    "assoc./comb.": 0.015541517435801195,
+    "OH stretch": 0.6868297028662055
+  },
+  "all_prefactors": {
+    "harmonic/r119": {
+      "mismatch": 0.6843749848276304,
+      "centroid": 3536.3649257072434,
+      "n_competing": 1,
+      "libration": 0.34618325082439305,
+      "HOH bend": 0.04163774322243839,
+      "assoc./comb.": 0.02332980602370382,
+      "OH stretch": 0.4932346948582499
+    },
+    "harmonic/tensoap": {
+      "mismatch": 0.8097675357781052,
+      "centroid": 3531.6359944488318,
+      "n_competing": 1,
+      "libration": 0.5478835124846334,
+      "HOH bend": 0.03943959157340621,
+      "assoc./comb.": 0.02258475547231106,
+      "OH stretch": 0.30063298371365427
+    },
+    "classical/r119": {
+      "mismatch": 0.7182584274026047,
+      "centroid": 3551.066818141278,
+      "n_competing": 1,
+      "libration": 0.1046833325187956,
+      "HOH bend": 0.029490221966633298,
+      "assoc./comb.": 0.02168961709968533,
+      "OH stretch": 0.7511938074829995
+    },
+    "classical/tensoap": {
+      "mismatch": 0.7156082419731283,
+      "centroid": 3551.055282969865,
+      "n_competing": 1,
+      "libration": 0.21958217437816796,
+      "HOH bend": 0.037099039792335975,
+      "assoc./comb.": 0.027794504916910982,
+      "OH stretch": 0.6077305186617368
+    },
+    "linear/r119": {
+      "mismatch": 0.6898372482675759,
+      "centroid": 3536.36485974272,
+      "n_competing": 1,
+      "libration": 0.3594677438117997,
+      "HOH bend": 0.040800638209914426,
+      "assoc./comb.": 0.022852138707031778,
+      "OH stretch": 0.4831155125914541
+    },
+    "linear/tensoap": {
+      "mismatch": 0.8196328205955888,
+      "centroid": 3531.6358867758995,
+      "n_competing": 1,
+      "libration": 0.5620774147449802,
+      "HOH bend": 0.03820534410585548,
+      "assoc./comb.": 0.021869813193601574,
+      "OH stretch": 0.29110365355332085
+    },
+    "none/r119": {
+      "mismatch": 0.9073780048472868,
+      "centroid": 3520.553343935606,
+      "n_competing": 1,
+      "libration": 0.7215685580898422,
+      "HOH bend": 0.03090350603235531,
+      "assoc./comb.": 0.013209915001388248,
+      "OH stretch": 0.16997406832122725
+    },
+    "none/tensoap": {
+      "mismatch": 0.9448617248072644,
+      "centroid": 3510.241179906928,
+      "n_competing": 1,
+      "libration": 0.8448012462756642,
+      "HOH bend": 0.021692955732537832,
+      "assoc./comb.": 0.00950808589655616,
+      "OH stretch": 0.07684683791180168
+    }
+  }
+}

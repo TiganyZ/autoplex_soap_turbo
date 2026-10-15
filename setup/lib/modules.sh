@@ -10,6 +10,27 @@
 # Sourced by the setup scripts and inlined verbatim into each machine's env.sh
 # by setup/render_config.py, so there is one copy of this logic.
 
+# Stop Lmod asking the terminal how wide it is.
+#
+# Lmod runs `tput cols` to format its output. Harmless everywhere except here:
+# CSC's python-data module is a Tykky/Apptainer wrapper, and once it is loaded
+# `tput` resolves to the CONTAINER's shim rather than /usr/bin/tput. Every
+# subsequent `module load` then boots an Apptainer container with squashfuse
+# mounts and a conda activation purely to print a number.
+#
+# Measured on roihu-cpu-login3: `module load openblas` costs 0.20 s in a clean
+# shell, 3.01 s once python-data is loaded, and 0.25 s with this variable set.
+# On a compute node, with the container image cold and dozens of jobs starting
+# at once, that per-load cost was 60 s and more -- the aims dispatcher spent
+# 18m34s of a 10-minute allocation in module loads and was killed by the time
+# limit, and its 40 children then sat for 15 minutes each without writing a
+# single input file. This one export is the fix for all of it.
+#
+# COLUMNS does not work; Lmod reads its own variable. Loading python-data last
+# would also work, but the ordering exists so that a Python module cannot
+# displace the compilers on PATH, and this keeps that guarantee.
+export LMOD_TERM_WIDTH=80
+
 init_module_system() {
     command -v module >/dev/null 2>&1 && return 0
 

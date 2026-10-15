@@ -129,7 +129,7 @@ sampling:
   # it, so it has everything. The flow now copies it rather than rebuilding it,
   # and its whole gap_files/ directory has to stay with it -- the .gap names
   # those files by relative path.
-  energy_potential: /scratch/project_2017844/gap_calculations/lif_dipole_test/gap_files/LiF.gap
+  energy_potential: /scratch/project_2006384/zarrout1/gap_calculations/lif_dipole_test/gap_files/LiF.gap
 
   carry_dipole_model: true
 

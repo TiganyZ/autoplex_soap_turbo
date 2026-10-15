@@ -1,0 +1,55 @@
+# The cluster ladder: MD on packed clusters that grow by one rung per
+# iteration. The seed carries no dipoles, so the flow first runs the reference
+# code over it -- the seed pass. The full versions are workflows/ethanol/,
+# workflows/water_ladder/ and workflows/water_density/.
+
+name: example_cluster_ladder
+species_list: [H, O]
+
+dataset:
+  initial: seed_structures.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  train_fraction: 0.67
+  seed: 0
+
+fit:
+  hyperparameters_file: ../minimal/gap_hypers.yaml
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: cluster_ladder
+  molecule_file: water.xyz
+  energy_potential: /path/on/sampling/machine/energy.gap
+  species_list: [H, C, O]
+  # Molecules per cluster, one rung per iteration, then held at the top.
+  cluster_ladder: [1, 2, 4]
+  # Molecules per A^3; liquid water.
+  cluster_density: 0.0334
+  cluster_padding: 8.0
+  cluster_min_separation: 1.6
+  n_candidates: 8
+  discard_initial: 2
+  md:
+    md_nsteps: 200
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 20
+
+selection:
+  method: fps
+  n_select: 2
+  min_separation: 0.8
+  min_pair_separation:
+    "O-O": 2.4
+  max_atoms: 12
+
+iterations: 3
+validation:
+  enabled: false

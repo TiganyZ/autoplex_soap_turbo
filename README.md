@@ -3,7 +3,7 @@
 Iterative training workflows for turboGAP-compatible GAP models, spread across
 the machines you already have.
 
-Two workflows share one setup:
+The three main workflows share one setup (all of them: [`docs/workflows.md`](docs/workflows.md)):
 
 | | reference method | target | where it runs |
 |---|---|---|---|
@@ -29,6 +29,10 @@ MongoDB, no `gap_fit`, no DFT. Then
 [`docs/training-guide.md`](docs/training-guide.md) walks from an empty machine
 to a real fitted model, with LiF as the worked example. This README is the
 reference; those are the paths through it.
+
+**Every workflow** under `workflows/` is explained in
+[`docs/workflows.md`](docs/workflows.md), each paired with a small example
+under [`examples/`](examples/) that runs the same shape in seconds.
 
 **Every settings key**, with its type and default, is
 [`docs/settings-reference.md`](docs/settings-reference.md), generated from
@@ -283,9 +287,9 @@ model is being asked to extrapolate. Those predictions are stripped from the
 candidate before it goes to DFT — under `predicted_dipole`, never under `mu` —
 so a self-predicted label can never be mistaken for a reference one.
 
-This needs a turboGAP built against the soap_turbo fork that implements dipole
-models (`TiganyZ/soap_turbo`, branch `cleanup`). `setup/build_turbogap.sh`
-checks it out and reports at the end whether the binary understands them.
+This needs turboGAP master, whose `src/soap_turbo` submodule is the fork that
+implements dipole models (`TiganyZ/soap_turbo`). `setup/build_turbogap.sh`
+builds it and reports at the end whether the binary understands them.
 
 Until an energy model exists — the first iteration, always — sampling falls back
 to displacing the structures already in the training set. It explores less, but

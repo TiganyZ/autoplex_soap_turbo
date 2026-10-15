@@ -272,6 +272,7 @@ _MODEL_INFO_KEYS = (
     "energy", "free_energy", "virial", "stress", "volume",
     "energy_soap", "energy_2b", "energy_3b", "energy_core_pot",
     "energy_vdw", "energy_exp", "energy_xps",
+    "energy_dipole", "energy_pdf", "energy_sf", "energy_xrd", "energy_nd",
 )
 
 #: The same, per atom.
@@ -358,8 +359,8 @@ def turbogap_md_sample(
         logger.warning(
             "a dipole model was supplied but no dipole came back in the "
             "trajectory. Check that this turboGAP build supports dipole models: "
-            "it needs the soap_turbo fork (TiganyZ/soap_turbo, branch 'cleanup') "
-            "that setup/build_turbogap.sh checks out."
+            "it needs turboGAP master, whose src/soap_turbo submodule is the "
+            "TiganyZ/soap_turbo fork."
         )
 
     return sampled

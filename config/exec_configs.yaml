@@ -6,6 +6,49 @@
 # the block a machine should use.
 #
 # No credentials belong in this file; it is tracked in git.
+#
+# ---------------------------------------------------------------------------
+# 2026-09-03: rebuilt under project_2006384 and verified end to end.
+#
+# The 2017844 outage is over -- both /projappl and /scratch under it read
+# again -- but nothing here points at it any more. What moved, and what was
+# learned doing it, is recorded below because two of the four findings are the
+# kind that fail silently.
+#
+# WHERE THINGS LIVE NOW. There is no `zarrout1/` level under
+# /projappl/project_2006384; the earlier version of this file invented one and
+# every path in it was wrong. FHI-aims, ELPA and the species defaults sit
+# directly under `install/`, and turboGAP and DoSPT directly under the project
+# root.
+#
+# WHAT WAS COPIED. Only the aims binary (74 MB) and the turboGAP feature/ir
+# binary (2.7 MB); ELPA, the species defaults and DoSPT were already in place.
+# /projappl runs a 15 G soft quota against 13.0 G used, so nothing else was
+# moved, and `aims` is a SYMLINK to aims.260501.scalapack.mpi.x rather than the
+# second full copy the old project kept -- that alone would have been another
+# 74 MB of a 2 G headroom.
+#
+# THE MODULE TRAP. /etc/profile.d/zz-csc-env.sh is what sets MODULEPATH, and it
+# returns immediately in a non-interactive shell unless
+# CSC_ENV_INIT_NON_INTERACTIVE=yes is exported first. Without it `module load`
+# reports "MODULEPATH is undefined", loads nothing, and the job then runs with
+# no openblas and no scalapack. qtoolkit emits the `modules:` block BEFORE
+# `pre_run` (qtoolkit/manager.py:88-93), so a `modules:` list cannot be relied
+# on here at all -- by the time it runs, `module` may not even be defined. The
+# loads are therefore repeated in pre_run, after the environment exists. They
+# are idempotent, so it costs nothing if the block above did work.
+#
+# THE HIERARCHY TRAP. netlib-scalapack lives inside the gcc+openmpi hierarchy,
+# so `module load gcc openmpi openblas netlib-scalapack` as a single command
+# silently drops scalapack. It has to be two commands, compiler and MPI first.
+#
+# ulimit -s unlimited is load-bearing, not hygiene: without it aims stops at
+# "Proc 1: Current stacksize too low" and calls MPI_ABORT.
+#
+# Verified 2026-09-03 on roihu-cpu-login3: a PBE/light water monomer on two
+# ranks reaches "Self-consistency cycle converged", -2078.49 eV, "Have a nice
+# day", and `ldd` reports no unresolved library for aims, turbogap or DoSPT.
+# ---------------------------------------------------------------------------
 
 roihu_aims_config:
   modules:
@@ -14,8 +57,8 @@ roihu_aims_config:
     - openblas/0.3.30
     - netlib-scalapack/2.2.2
   export:
-    AIMS_ROOT: "/projappl/project_2017844/install/FHIaims"
-    ELPA_ROOT: "/projappl/project_2017844/install/elpa-2026.02.001"
+    AIMS_ROOT: "/projappl/project_2006384/install/FHIaims"
+    ELPA_ROOT: "/projappl/project_2006384/install/elpa-2026.02.001"
     AIMS_BUILD: "build_gnu_17_no_openmp_openmpi_avx512_cpu"
     AIMS_BUILD_DIR: "${AIMS_ROOT}/${AIMS_BUILD}"
     ELPA_BUILD_DIR: "${ELPA_ROOT}/${AIMS_BUILD}"
@@ -25,16 +68,30 @@ roihu_aims_config:
     PATH: "${AIMS_BUILD_DIR}:${PATH}"
     OMP_NUM_THREADS: 1
   pre_run: |
+    export CSC_ENV_INIT_NON_INTERACTIVE=yes
+    # Lmod shells out to `tput cols`, which the python-data Tykky container
+    # shadows, so every module load after it starts an Apptainer container.
+    # 3.01 s -> 0.25 s per load; on a cold compute node it was minutes per
+    # load. See setup/lib/modules.sh for the measurements.
+    export LMOD_TERM_WIDTH=80
     source /etc/profile
     source ~/.bashrc
+    module load gcc/15.2.0 openmpi/5.0.10
+    module load openblas/0.3.30 netlib-scalapack/2.2.2
     ulimit -s unlimited
 
+# NOT BUILT. The GPU tree under install/gpu/ holds sources -- FHIaims, two ELPA
+# versions, aims-compile -- and no build directory for either, in the new
+# project or the old one. The paths below are where a GPU build would go, not
+# where one is. Do not point a workflow at this block until
+# ${AIMS_BUILD_DIR}/aims exists and `ldd` on it is clean; the CPU block above
+# is what the DFT batches use.
 roihu_aims_gpu_config:
   modules:
     - nvhpc
   export:
-    AIMS_ROOT: "/projappl/project_2017844/install/gpu/FHIaims"
-    ELPA_ROOT: "/projappl/project_2017844/install/gpu/elpa-2026.02.002"
+    AIMS_ROOT: "/projappl/project_2006384/install/gpu/FHIaims"
+    ELPA_ROOT: "/projappl/project_2006384/install/gpu/elpa-2026.02.002"
     AIMS_BUILD: "build_nvhpc_seq_gpu"
     AIMS_BUILD_DIR: "${AIMS_ROOT}/${AIMS_BUILD}"
     ELPA_BUILD_DIR: "${ELPA_ROOT}/${AIMS_BUILD}"
@@ -43,25 +100,41 @@ roihu_aims_gpu_config:
     INCLUDE: "${ELPA_BUILD_DIR}/modules:${INCLUDE}"
     PATH: "${AIMS_BUILD_DIR}:${PATH}"
   pre_run: |
+    export CSC_ENV_INIT_NON_INTERACTIVE=yes
+    # Lmod shells out to `tput cols`, which the python-data Tykky container
+    # shadows, so every module load after it starts an Apptainer container.
+    # 3.01 s -> 0.25 s per load; on a cold compute node it was minutes per
+    # load. See setup/lib/modules.sh for the measurements.
+    export LMOD_TERM_WIDTH=80
     source /etc/profile
     source ~/.bashrc
+    module load nvhpc
     ulimit -s unlimited
 
+# VASP comes from project_2020289, which was never affected by the outage.
+# `module use` needs `module` to exist, so this block needs the same CSC env
+# init as the others.
 roihu_vasp_config:
   export:
     OMP_NUM_THREADS: 1
   pre_run: |
+    export CSC_ENV_INIT_NON_INTERACTIVE=yes
+    # Lmod shells out to `tput cols`, which the python-data Tykky container
+    # shadows, so every module load after it starts an Apptainer container.
+    # 3.01 s -> 0.25 s per load; on a cold compute node it was minutes per
+    # load. See setup/lib/modules.sh for the measurements.
+    export LMOD_TERM_WIDTH=80
     source /etc/profile
     source ~/.bashrc
     module use /projappl/project_2020289/modules/modulefiles
     module load vasp/cpu/6.6.1
     ulimit -s unlimited
 
-# turboGAP with the MAD-IR feature branch: ir_fft.f90, mad_ir_xl.f90 and the
-# GLE thermostat. A SEPARATE BINARY from the one the sampling workflows use,
-# because it is built from `feature/ir` rather than from what is on master, and
-# because two workflows sharing one bin/turbogap means a rebuild for one of them
-# silently changes the other.
+# turboGAP for the IR workflow: ir_fft.f90, mad_ir_xl.f90 and the GLE
+# thermostat. These are on master since 2026-09, but the binary below is still
+# the older `feature/ir` build; rebuild it from master. It stays a SEPARATE
+# BINARY from the sampling one because two workflows sharing one bin/turbogap
+# means a rebuild for one of them silently changes the other.
 #
 # TURBOGAP_BIN is a fallback: workflows/water_ir_matching names `executable`
 # explicitly, and turbogap/ir.py only consults the environment when it does not.
@@ -72,10 +145,18 @@ roihu_turbogap_ir_config:
     - openmpi/5.0.10
     - openblas/0.3.30
   export:
-    TURBOGAP_BIN: "/projappl/project_2017844/turbogap_feature_ir/bin/turbogap"
-    DOSPT_BIN: "/projappl/project_2017844/dospt/bin/DoSPT"
+    TURBOGAP_BIN: "/projappl/project_2006384/turbogap_feature_ir/bin/turbogap"
+    DOSPT_BIN: "/projappl/project_2006384/dospt/bin/DoSPT"
     OMP_NUM_THREADS: 1
   pre_run: |
+    export CSC_ENV_INIT_NON_INTERACTIVE=yes
+    # Lmod shells out to `tput cols`, which the python-data Tykky container
+    # shadows, so every module load after it starts an Apptainer container.
+    # 3.01 s -> 0.25 s per load; on a cold compute node it was minutes per
+    # load. See setup/lib/modules.sh for the measurements.
+    export LMOD_TERM_WIDTH=80
     source /etc/profile
     source ~/.bashrc
+    module load gcc/15.2.0 openmpi/5.0.10
+    module load openblas/0.3.30
     ulimit -s unlimited

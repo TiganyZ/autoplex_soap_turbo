@@ -1,0 +1,62 @@
+# The smallest complete iterative dipole workflow, for reading and for checking
+# an installation. Nothing here is physically meaningful.
+#
+#     python examples/minimal/run.py --dry-run    # the shape of the run
+#     python examples/minimal/run.py --stub       # run it, seconds, no binaries
+#     python examples/minimal/run.py --local      # run it for real, needs gap_fit
+#
+# See README.md beside this file.
+
+name: minimal
+# No `project:` -- this example is never submitted to a cluster. A real workflow
+# names the jobflow-remote project here (see workflows/water_dipole/).
+
+species_list: [H, O]
+
+# Three, so a gated run has something to converge over without taking long.
+iterations: 3
+
+dataset:
+  initial: seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+
+  # A dipole is only well defined for an isolated system, so the frames get a
+  # box but no periodic boundary conditions. The dipole workflow refuses
+  # `periodic: true` outright.
+  periodic: false
+  box: 12.0
+
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: gap_hypers.yaml
+  # No worker: with nothing named, every stage runs wherever the flow is run.
+  # A real workflow names one per stage -- that is what puts the fit on the
+  # machine with gap_fit and the sampling on the machine with turboGAP.
+
+energy_fit:
+  # There are no reference energies in the seed data -- point charges give a
+  # dipole and nothing else -- so there is nothing for an energy model to learn.
+  enabled: false
+
+sampling:
+  # Displacement of the structures already in the training set. It needs no
+  # potential and no turboGAP, which is what makes this example self-contained;
+  # the real workflows use `turbogap_md` or `gcmc` once an energy model exists.
+  method: rattle
+  n_candidates: 8
+  rattle_stdev: 0.05
+
+selection:
+  # Farthest-point selection against what is already known. Two per iteration
+  # out of eight candidates, so the training set grows visibly across the run.
+  n_select: 2
+
+validation:
+  # Off: this example stops after `iterations` rather than when an error falls
+  # below a tolerance. Turning it on switches the flow to the dynamic gated
+  # form, where each iteration decides whether to build the next -- see
+  # `workflows/lif/aims/training.yaml` for a configured one.
+  enabled: false

@@ -7,6 +7,9 @@ from, and a three-line `run.py` that hands both to the shared front end in
 New here? [`examples/minimal/`](../examples/minimal/) runs in seconds with no
 cluster, and is the thing to read first.
 
+[`docs/workflows.md`](../docs/workflows.md) explains every directory here and
+names the example under [`examples/`](../examples/) that runs the same shape.
+
 ## What is here
 
 | | reference | what it demonstrates |
@@ -19,7 +22,17 @@ cluster, and is the thing to read first.
 | `ethanol/` | FHI-aims | the cluster ladder, on a frozen CHO potential |
 | `water_ladder/` | FHI-aims | the same, smaller and faster |
 | `water_density/` | FHI-aims | liquid-density sampling |
+| `water_dipole_md/` | FHI-aims | turboGAP MD on a frozen potential, gated on a fixed test file |
+| `water_dipole_md_uncertainty/` | FHI-aims | the same, selecting by committee disagreement |
+| `water_dipole_gcmc/` | FHI-aims | the same, sampled by GCMC exchanging whole H2O |
+| `water_dipole_batch/` | FHI-aims | a custom flow: one reference pass over a pre-selected batch |
 | `water_ir_matching/` | — | nothing is fitted: a measurement workflow |
+| `water_ir_tensoap/` | — | our dipole architecture on the TENSOAP authors' data, on their own q-TIP4P/F dynamics, classical and PIMD |
+| `water_ipi_piglet/` | — | i-PI drives turboGAP: PIGLET path-integral MD with our GAP, and its 1-bead control |
+
+The last three are not autoplex flows and have no `run.py`: they are
+measurement campaigns whose stages are shell scripts and turboGAP decks, kept
+here because that is where a reader looks for a configured run.
 
 ## Starting a new one
 

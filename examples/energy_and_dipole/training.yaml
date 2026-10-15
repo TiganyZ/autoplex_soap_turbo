@@ -1,0 +1,45 @@
+# Mode A: the dipole model and the energy model come from the same reference
+# calculations. The energy model is fitted once enough frames carry an energy,
+# and from then on it drives the sampler. The full versions are
+# workflows/water_dipole/ and workflows/lif/.
+
+name: example_energy_and_dipole
+species_list: [H, O]
+
+dataset:
+  initial: ../minimal/seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  box: 12.0
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: ../minimal/gap_hypers.yaml
+
+energy_fit:
+  enabled: true
+  # The seed carries no energies; the fit waits for the reference stage.
+  min_frames: 2
+
+sampling:
+  # No energy_potential: turbogap_md is driven by the energy model fitted here.
+  method: turbogap_md
+  carry_dipole_model: true
+  n_candidates: 8
+  md:
+    md_nsteps: 200
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 20
+
+selection:
+  n_select: 2
+
+iterations: 3
+validation:
+  enabled: false

@@ -1,0 +1,37 @@
+# Committee selection: several models are fitted on resamples of the data, and
+# the candidates they disagree on most go to DFT. The full version is
+# workflows/water_dipole_md_uncertainty/.
+
+name: example_uncertainty
+species_list: [H, O]
+
+dataset:
+  initial: ../minimal/seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  box: 12.0
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: ../minimal/gap_hypers.yaml
+  committee_size: 4
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: rattle
+  n_candidates: 8
+  rattle_stdev: 0.05
+
+selection:
+  method: uncertainty
+  # Diversity is picked from the 3 x n_select most uncertain candidates.
+  uncertainty_shortlist: 3.0
+  n_select: 2
+
+iterations: 2
+validation:
+  enabled: false

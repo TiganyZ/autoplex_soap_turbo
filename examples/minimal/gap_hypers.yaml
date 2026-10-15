@@ -1,0 +1,33 @@
+# GAP hyperparameters for the minimal example.
+#
+# Loaded as autoplex.settings.MLIPHypers, so anything not listed here falls back
+# to the defaults in autoplex.settings.GAPSettings. Deliberately small and fast
+# rather than good -- this file exists so the example finishes, not so it fits.
+# `workflows/water_ladder/gap_hypers.yaml` is the one to copy for real work; it
+# explains why each value is what it is.
+
+GAP:
+  general:
+    # Only soap_turbo. turboGAP cannot evaluate QUIP's `soap`, `two_body` or
+    # `three_body`, so leaving any of those on gives a potential that fits and
+    # then cannot be converted -- and the workflows refuse them for that reason.
+    two_body: false
+    three_body: false
+    soap: false
+    distance_2b: false
+    angle_3b: false
+    soap_turbo: true
+
+    sparse_jitter: 1.0e-8
+
+  soap_turbo:
+    # rcut_hard must be less than half the box in training.yaml (12 A), or the
+    # descriptor reaches across the vacuum and back into the molecule.
+    rcut_hard: 4.0
+    rcut_soft: 3.5
+    l_max: 4
+    n_sparse: 50
+    # poly3gauss rather than poly3: above alpha_max 7 the poly3 basis is
+    # unstable, and this is the basis that stays well behaved.
+    basis: '"poly3gauss"'
+    delta: 0.5

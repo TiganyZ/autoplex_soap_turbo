@@ -139,7 +139,7 @@ sampling:
   # overlaps are not.
   cluster_min_separation: 1.6
 
-  energy_potential: /scratch/project_2017844/potentials/CHO_gap/gap_files/CHO.gap
+  energy_potential: /scratch/project_2003566/zarrout1/potentials/CHO_gap/gap_files/CHO.gap
   carry_dipole_model: true
 
   n_candidates: 200

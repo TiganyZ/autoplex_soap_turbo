@@ -11,7 +11,7 @@ set -euo pipefail
 SRC_HOST=${SRC_HOST:-tr}
 SRC_DIR=${SRC_DIR:-/scratch/elec/sumo/tigany/LiF/iteration_14/results_LiF_iterative_training_14_2026-05-19--11-24-30}
 DEST_HOST=${DEST_HOST:-roihuc1}
-DEST_DIR=${DEST_DIR:-/scratch/project_2017844/gap_calculations/lif_dipole_test}
+DEST_DIR=${DEST_DIR:-/scratch/project_2006384/zarrout1/gap_calculations/lif_dipole_test}
 LOCAL=${LOCAL:-.}
 
 echo "== fetching potential from $SRC_HOST:$SRC_DIR"

@@ -3,15 +3,13 @@
 #
 #     bash setup/build_turbogap.sh --work-dir /scratch/... --modules gcc,openmpi,openblas
 #
-# turboGAP carries soap_turbo as a git submodule and compiles it into the
-# binary. This script switches that submodule to the fork that implements
-# dipole models -- a GAP whose blocks carry `dipole_model = .true.`, whose
-# fitted scalar turboGAP treats as a potential whose gradient is the local
-# dipole rather than as an energy. Without it, turboGAP reads such a potential
-# as a second energy model and the dynamics are wrong.
+# Builds turboGAP master, whose src/soap_turbo submodule is already pinned to
+# the fork that implements dipole models (`dipole_model = .true.`). Without
+# it, turboGAP reads a dipole GAP as a second energy model.
+# --soap-turbo-branch moves the submodule off that pin, for testing a branch.
 #
-# Runs *on* the target machine. Re-running rebuilds in place; --clean starts
-# from scratch.
+# Runs *on* the target machine. Re-running fast-forwards and rebuilds in
+# place; --clean starts from scratch.
 
 set -euo pipefail
 
@@ -21,10 +19,11 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 TURBOGAP_URL="https://github.com/mcaroba/turbogap.git"
 
-#: The soap_turbo fork with dipole model support, and its branch.
+#: The soap_turbo fork; only used with --soap-turbo-branch.
 SOAP_TURBO_REMOTE_NAME="TiganyZ"
 SOAP_TURBO_URL="https://github.com/TiganyZ/soap_turbo.git"
-SOAP_TURBO_BRANCH="cleanup"
+#: Empty builds the commit turboGAP pins.
+SOAP_TURBO_BRANCH=""
 
 work_dir="$PWD"
 modules=""
@@ -41,10 +40,9 @@ while [ $# -gt 0 ]; do
         --arch)              arch="$2"; shift 2 ;;
         --branch)            branch="$2"; shift 2 ;;
         --soap-turbo-branch) soap_turbo_branch="$2"; shift 2 ;;
-        --stock-soap-turbo)  soap_turbo_branch=""; shift ;;
         --jobs)              jobs="$2"; shift 2 ;;
         --clean)             do_clean=1; shift ;;
-        -h|--help)           sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help)           sed -n '2,12p' "$0"; exit 0 ;;
         *)                   die "unknown option: $1" ;;
     esac
 done
@@ -73,7 +71,13 @@ if [ -d "$src_dir/.git" ]; then
     log "updating $src_dir"
     git -C "$src_dir" fetch --quiet --recurse-submodules \
         || warn "fetch failed; building the checkout as it stands"
-    [ -n "$branch" ] && git -C "$src_dir" checkout --quiet "$branch"
+    if [ -n "$branch" ]; then
+        git -C "$src_dir" checkout --quiet "$branch"
+    fi
+    git -C "$src_dir" pull --quiet --ff-only \
+        || warn "could not fast-forward; building the checkout as it stands"
+    # Master moved src/soap_turbo to the fork, so an older clone's URL is stale.
+    git -C "$src_dir" submodule sync --recursive --quiet
     git -C "$src_dir" submodule update --init --recursive --quiet
 else
     log "cloning turboGAP into $src_dir"
@@ -112,9 +116,7 @@ if [ -n "$soap_turbo_branch" ]; then
 
     ok "soap_turbo at $(git -C "$soap_dir" rev-parse --short HEAD) ($soap_turbo_branch)"
 else
-    warn "--stock-soap-turbo: building against the bundled soap_turbo.
-      This turboGAP will not understand 'dipole_model = .true.', so it cannot
-      carry a dipole model along an MD trajectory."
+    ok "soap_turbo at $(git -C "$soap_dir" rev-parse --short HEAD) (pinned by turboGAP)"
 fi
 
 # -------------------------------------------------------------------- arch --
@@ -126,9 +128,10 @@ available=$(cd "$src_dir/makefiles" && ls Makefile.* 2>/dev/null | sed 's/^Makef
 if [ -z "$arch" ]; then
     host_tag=$(hostname -f 2>/dev/null || hostname)
     case "$host_tag" in
-        *roihu*) arch=$(grep -m1 -i 'roihu' <<< "$available" || true) ;;
-        *mahti*) arch=$(grep -m1 -i 'mahti' <<< "$available" || true) ;;
-        *puhti*) arch=$(grep -m1 -i 'puhti' <<< "$available" || true) ;;
+        # _mpi$: Roihu also has a _cuda makefile, which sorts first.
+        *roihu*) arch=$(grep -i 'roihu' <<< "$available" | grep -m1 -i '_mpi$' || true) ;;
+        *mahti*) arch=$(grep -i 'mahti' <<< "$available" | grep -m1 -i '_mpi$' || true) ;;
+        *puhti*) arch=$(grep -i 'puhti' <<< "$available" | grep -m1 -i '_mpi$' || true) ;;
     esac
 fi
 if [ -z "$arch" ]; then
@@ -171,6 +174,6 @@ elif grep -rqi 'is_dipole_model' "$src_dir/src" 2>/dev/null; then
     ok "dipole models: present in the sources built here"
 else
     warn "this turboGAP does not mention 'dipole_model'. MD sampling will still
-      run, but it cannot carry a dipole model along the trajectory. Rebuild
-      without --stock-soap-turbo to get the fork that implements it."
+      run, but it cannot carry a dipole model along the trajectory. Build
+      turboGAP master, whose soap_turbo submodule implements it."
 fi

@@ -211,3 +211,12 @@ def test_the_reference_flags_whole_blocks_not_stray_lines():
     # The dipole GAP has one block per central species; water has two.
     assert len(flagged) == 2
     assert all("soap_turbo" in block.splitlines()[0] for block in flagged)
+
+
+def test_a_dipole_model_with_a_non_soap_block_is_refused(tmp_path):
+    """turboGAP reads dipole_model only in soap_turbo blocks; the rest is energy."""
+    potential = write(tmp_path, "dipole.gap", DIPOLE_GAP + "\n" + ENERGY_GAP)
+
+    with pytest.raises(ValueError, match="distance_2b"):
+        mark_as_dipole_model(potential)
+    assert DIPOLE_MODEL_FLAG not in potential.read_text()

@@ -43,11 +43,31 @@ def _build(cls, data: dict | None, context: str):
     return cls(**data)
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """``SafeLoader`` that refuses a repeated key instead of keeping the last."""
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ConfigError(
+                    f"duplicate key '{key}' at line {key_node.start_mark.line + 1}; "
+                    "YAML keeps only the last one"
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+def _load_yaml(text: str):
+    return yaml.load(text, Loader=_UniqueKeyLoader)
+
+
 def _read_yaml(path: Path) -> dict:
     """Read a YAML file, failing with the path rather than a bare KeyError."""
     if not path.is_file():
         raise ConfigError(f"no hyperparameters file at {path}")
-    data = yaml.safe_load(path.read_text()) or {}
+    data = _load_yaml(path.read_text()) or {}
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
     return data
@@ -720,7 +740,10 @@ class TrainingConfig:
         if not path.is_file():
             raise ConfigError(f"no settings file at {path}")
 
-        raw = yaml.safe_load(path.read_text()) or {}
+        try:
+            raw = _load_yaml(path.read_text()) or {}
+        except ConfigError as error:
+            raise ConfigError(f"{path}: {error}") from None
         if not isinstance(raw, dict):
             raise ConfigError(f"{path}: expected a mapping at the top level")
 

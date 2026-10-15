@@ -20,7 +20,7 @@ vasp:
   worker: roihu_cpu_vasp
   exec_config: roihu_vasp_config
   resources:
-    account: project_2017844
+    account: project_2006384
     partition: medium
     nodes: 1
     ntasks_per_node: 128
@@ -41,7 +41,7 @@ fit:
 general:
   worker: roihu_cpu_worker
   resources:
-    account: project_2017844
+    account: project_2006384
     partition: small
     nodes: 1
     ntasks_per_node: 32

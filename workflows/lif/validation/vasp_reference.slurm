@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=lif_vasp_ref
-#SBATCH --account=project_2017844
+#SBATCH --account=project_2006384
 #SBATCH --partition=small
 #SBATCH --nodes=1
 #SBATCH --ntasks=32
@@ -15,7 +15,7 @@ source /etc/profile.d/zz-csc-env.sh >/dev/null 2>&1
 module use /projappl/project_2020289/modules/modulefiles
 module load vasp/cpu/6.6.1
 
-BASE=/scratch/project_2017844/gap_calculations/lif_dipole_test/vasp/combined
+BASE=/scratch/project_2003566/zarrout1/gap_calculations/lif_dipole_test/vasp/combined
 for d in "$BASE"/frame_*; do
     [ -d "$d" ] || continue
     [ -f "$d/OUTCAR" ] && grep -q "General timing" "$d/OUTCAR" && { echo "skip $(basename $d)"; continue; }

@@ -1,0 +1,49 @@
+# The same loop with VASP as the reference code instead of FHI-aims: the
+# dipole from LCALCPOL, the polarizability from LEPSILON. Having a `vasp:`
+# section is what selects it. The full versions are workflows/lif/ and
+# workflows/lif/validation/training_frozen_gap.yaml.
+
+name: example_vasp_reference
+species_list: [H, O]
+
+dataset:
+  initial: ../minimal/seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  box: 12.0
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: ../minimal/gap_hypers.yaml
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: rattle
+  n_candidates: 8
+
+selection:
+  n_select: 2
+
+vasp:
+  molecular: true
+  # Angstrom between periodic images below which no polarizability is derived.
+  min_vacuum: 5.0
+  # Merged over autoplex_soap_turbo.vasp.jobs.DEFAULT_RESPONSE_INCAR.
+  user_incar_settings:
+    ENCUT: 500.0
+    LCALCPOL: true
+    LEPSILON: true
+  # Per-structure requests, matched on atom count.
+  resource_tiers:
+    - max_atoms: 24
+      resources: {nodes: 1, ntasks_per_node: 32, time: "02:00:00"}
+    - max_atoms: null
+      resources: {nodes: 1, ntasks_per_node: 64, time: "06:00:00"}
+
+iterations: 2
+validation:
+  enabled: false

@@ -289,12 +289,26 @@ def mark_as_dipole_model(potential: Path) -> int:
 
     Returns the number of blocks marked. A dipole GAP fitted through this repo
     has one soap_turbo block per central species, so for water that is two.
+    turboGAP honours the flag only in soap_turbo blocks, so any other block
+    would be summed into the energy; such a file is refused.
     """
     text = potential.read_text()
     if DIPOLE_MODEL_FLAG in text:
         return text.count(DIPOLE_MODEL_FLAG)
 
     lines = text.splitlines()
+    others = sorted({
+        line.split()[1] for line in lines
+        if line.split()[:1] == ["gap_beg"] and len(line.split()) > 1
+        and line.split()[1] != "soap_turbo"
+    })
+    if others:
+        raise ValueError(
+            f"{potential.name} has {', '.join(others)} block(s); turboGAP reads "
+            "dipole_model only in soap_turbo blocks, so these would add to the "
+            "energy. Fit the dipole model with soap_turbo alone."
+        )
+
     marked, output = 0, []
     for line in lines:
         if line.strip() == "gap_end":

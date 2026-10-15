@@ -138,7 +138,55 @@ def arm_pairs(ir: dict) -> list[dict]:
     names = [a["name"] for a in out]
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate arm name(s) in ir.arms: {names}")
+    _check_one_prefactor(out, ir)
     return out
+
+
+#: The two prefactor conventions, and which estimator applies which.
+#: mad_ir.f90 (`acf`, `xl`) applies ir_nu_power, default 2, i.e. w^2.
+#: ir_fft.f90 (`fft`) applies ir_fft_quantum_correction, and only its
+#: "classical"/"quadratic" setting is that same w^2.
+_W2_CORRECTIONS = ("classical", "quadratic")
+
+
+def _check_one_prefactor(arms: list[dict], ir: dict) -> None:
+    """Refuse a run whose arms would be weighted differently from each other.
+
+    Linear response gives the absorption as w(1 - exp(-beta hbar w)) times the
+    transform of the QUANTUM dipole autocorrelation. mad_ir.f90 applies the
+    harmonic quantum correction factor, which cancels that bracket and leaves
+    w^2 C_cl -- `ir_nu_power = 2`, and its default. ir_fft.f90 instead applies
+    w(1 - exp(-x)) to the classical lineshape, which is its `harmonic` setting
+    and its default.
+
+    The two differ by a factor of 16 at 3400 cm^-1 and agree only below about
+    208 cm^-1. It is a TILT across the range, not a scale, so the least-squares
+    factor each arm fits against experiment does not absorb it: an fft arm and
+    an acf arm scored the same way are not measuring the same thing, and the
+    whole point of running several estimators is to compare their
+    dissimilarities. Measured on liquid water, the choice moves one model's
+    relative mismatch from 0.841 to 0.633 -- larger than the difference between
+    the models the comparison exists to rank.
+
+    So a run may mix estimator families only when the fft ones are put on w^2
+    too. Nothing here forces a value on a single-family run: an all-fft run
+    under `harmonic` is self-consistent, and only its absolute number is
+    convention-dependent.
+    """
+    families = {"fft" if a.get("bias_mode") == "fft" else "mad" for a in arms}
+    if len(families) < 2:
+        return
+    correction = str(ir.get("quantum_correction", "classical")).lower()
+    if correction not in _W2_CORRECTIONS:
+        raise ValueError(
+            f"ir.quantum_correction = {correction!r} weights the fft arms as "
+            "w(1 - exp(-hbar w/kT)) while the acf and xl arms are weighted as "
+            "w^2 by ir_nu_power -- a factor of 16 apart at 3400 cm^-1, and a "
+            "tilt that no fitted scale absorbs, so their dissimilarities are "
+            "not comparable and ranking the arms against each other is "
+            "meaningless. Set quantum_correction to 'classical' (alias "
+            "'quadratic'), or run one estimator family."
+        )
 
 
 def expand_arms(ir: dict) -> tuple[list[dict], list[dict]]:
@@ -537,7 +585,7 @@ def _cfg(config: dict, pot: dict | None, dipole: bool = True) -> dict:
       afterwards, so predicting one during equilibration is a second pair of
       soap_turbo descriptors evaluated at every step and thrown away.
     - there is no keyword for it. ``params%do_dipole`` is derived from whether
-      any block carries ``dipole_model`` (turbogap_setup.f90:253), so the only
+      any block carries ``dipole_model`` (turbogap_setup.f90), so the only
       way to not compute a dipole is to hand turboGAP a file without one.
     """
     cfg = dict(config["turbogap"])
@@ -621,7 +669,7 @@ def smoke_test_potential(cfg: dict, structure: Path, work: Path,
         if found is None:
             raise RuntimeError(
                 f"no dipole= tag in {traj}. turboGAP derives do_dipole from the "
-                "presence of a dipole_model block (turbogap_setup.f90:253), so "
+                "presence of a dipole_model block (turbogap_setup.f90), so "
                 "this means the composed potential has no dipole model in it and "
                 "every IR spectrum downstream would be the autocorrelation of a "
                 "constant."
@@ -911,16 +959,17 @@ def run_ir_prediction(equil: dict, config: dict, pot: dict | None = None) -> dic
     (d / "traj.xyz").symlink_to(Path(equil["dospt_trajectory"]).resolve())
 
     deck = {
-        # do_forces stays ON. A dipole model IS a derivative -- mu_i =
-        # d(soap_i)/d(r_i) -- and the arrays that path writes into are allocated
-        # behind `if (params%do_forces)` (turbogap.f90:1317). Asking for a
-        # dipole with do_forces = .false. segfaults on the first frame, inside
-        # the SOAP kernel, with nothing in the message naming the cause.
+        # do_forces on: builds before the 2026-09 master segfaulted on a
+        # dipole without it.
         "atoms_file": '"traj.xyz"', "do_prediction": ".true.",
         "do_ir": ".true.", "ir_bias_mode": "fft",
         "ir_nu_max": ir.get("nu_max", 4000.0),
         "ir_fft_acf_ratio": ir.get("acf_ratio", 0.2),
-        "ir_fft_quantum_correction": ir.get("quantum_correction", "harmonic"),
+        # "classical" (w^2), not ir_fft.f90's own "harmonic" default: it is what
+        # mad_ir.f90 applies through ir_nu_power, so the estimator families
+        # stay comparable, and it is the form ir_fft.f90's header calls
+        # right. See _check_one_prefactor.
+        "ir_fft_quantum_correction": ir.get("quantum_correction", "classical"),
         "ir_fft_smooth_k": ir.get("smooth_k", 10),
         "ir_fft_temperature": ir.get("temperature", 300.0),
         "do_md": None, "md_step": None, "thermostat": None, "tau_t": None,
@@ -1030,7 +1079,11 @@ def run_ir_arm(equil: dict, config: dict, arm: dict, reference: dict | None,
         deck.update({"ir_resolution": ir.get("resolution", 35.0),
                      "ir_lag_factor": ir.get("lag_factor", 2),
                      "ir_fft_acf_ratio": ir.get("acf_ratio_md", 0.5),
-                     "ir_fft_quantum_correction": ir.get("quantum_correction", "harmonic"),
+                     # "classical" (w^2), not ir_fft.f90's own "harmonic" default: it is what
+        # mad_ir.f90 applies through ir_nu_power, so the estimator families
+        # stay comparable, and it is the form ir_fft.f90's header calls
+        # right. See _check_one_prefactor.
+        "ir_fft_quantum_correction": ir.get("quantum_correction", "classical"),
                      "ir_fft_smooth_k": ir.get("smooth_k", 10),
                      "ir_fft_temperature": T})
 

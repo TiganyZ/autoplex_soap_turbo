@@ -1,11 +1,10 @@
-# A water dipole model, trained on clusters of growing size.
+# A water dipole model, sampled by turboGAP MD on the frozen CHO GAP.
 #
-#     python workflows/water_ladder/run.py --dry-run
-#     python workflows/water_ladder/run.py
+#     python workflows/water_dipole_md/run.py --dry-run
+#     python workflows/water_dipole_md/run.py
 #
-# The same protocol as workflows/ethanol/, on a molecule a third the size, and
-# deliberately sized to finish quickly rather than to be the most thorough
-# possible run. Where the two differ, the reason is one of those two things.
+# Settings follow workflows/water_ladder/ except the sampler; docs/workflows.md
+# compares the three sampler variants.
 #
 # Mode B: the energy/force model is frozen and only the dipole model iterates.
 #
@@ -81,34 +80,7 @@ sampling:
   # an energy model exists to integrate.
   species_list: [H, C, O]
 
-  n_candidates: 200
-
-  # The first frames of a trajectory are the starting structure barely moved.
-  # Keeping them adds rows that teach the model what it already knows.
-  discard_initial: 5
-
-  md:
-    md_nsteps: 4000
-
-    # 0.5 fs. The O-H stretch is water's fastest mode at ~3700 cm^-1, a 9 fs
-    # period; 1 fs would integrate it with nine points and heat the run.
-    md_step: 0.5
-
-    # Berendsen rather than a velocity rescale: the point is to sample a
-    # thermal ensemble, and hard rescaling leaves the trajectory correlated
-    # with whatever the starting velocities happened to be.
-    thermostat: '"berendsen"'
-    tau_t: 100.0
-
-    # Liquid water at ambient. Not higher: this samples the configurations the
-    # dipole model has to be right about, and a 600 K trajectory is a different
-    # phase wearing the same formula.
-    t_beg: 300.0
-    t_end: 300.0
-
-    write_xyz: 50
-
-  energy_potential: /scratch/project_2017844/potentials/CHO_gap/gap_files/CHO.gap
+  energy_potential: /scratch/project_2003566/zarrout1/potentials/CHO_gap/gap_files/CHO.gap
 
   # On. The fitted dipole model is concatenated into the same turboGAP file as
   # the energy model, and the two declare different species lists -- two against

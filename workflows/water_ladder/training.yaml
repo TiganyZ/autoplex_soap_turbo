@@ -91,7 +91,7 @@ sampling:
   # here than for ethanol: a water cluster with no hydrogen bonds is not water.
   cluster_min_separation: 1.6
 
-  energy_potential: /scratch/project_2017844/potentials/CHO_gap/gap_files/CHO.gap
+  energy_potential: /scratch/project_2003566/zarrout1/potentials/CHO_gap/gap_files/CHO.gap
 
   # On. The fitted dipole model is concatenated into the same turboGAP file as
   # the energy model, and the two declare different species lists -- two against

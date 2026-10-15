@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --account=project_2017844
+#SBATCH --account=project_2006384
 #SBATCH --partition=medium
 #SBATCH --nodes=1
 #SBATCH --ntasks=48
@@ -37,7 +37,7 @@
 # cores because a relative path resolved somewhere else.
 set -euo pipefail
 
-ROOT=/projappl/project_2017844/autoplex_soap_turbo_ir
+ROOT=/projappl/project_2006384/zarrout1/autoplex_soap_turbo_ir
 CONFIG="${1:-$ROOT/workflows/water_ir_matching/config.yaml}"
 shift || true
 case "$CONFIG" in /*) ;; *) CONFIG="$ROOT/workflows/water_ir_matching/$CONFIG" ;; esac

@@ -3,7 +3,7 @@
 
     # on the cluster that ran the DFT
     autoplex-st-build-dataset \
-        --root /scratch/project_2017844/gap_calculations/run/aims \
+        --root /scratch/project_2006384/zarrout1/gap_calculations/run/aims \
         --species H O \
         -o train.extxyz
 

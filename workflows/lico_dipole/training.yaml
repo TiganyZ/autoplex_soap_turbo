@@ -1,0 +1,103 @@
+# Li2CO3 cluster dipole model, Mode B: the frozen LiCO.gap from Part 2 drives a
+# grand-canonical walk; only the dipole model iterates.
+#     python workflows/lico_dipole/run.py --dry-run | --stub | (submit)
+name: lico_dipole
+project: lico_tutorial
+species_list: [Li, C, O]
+iterations: 4
+
+dataset:
+  # Bare geometries: the flow computes their dipoles before iteration 0.
+  initial: data/seed_structures.xyz
+  dipole_key: mu
+  polarizability_key: alpha
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+  periodic: false
+  box: 20.0
+  train_fraction: 0.8
+  seed: 0
+
+sampling:
+  worker: roihu_cpu_turbogap
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 8, time: "02:00:00"}
+  method: gcmc
+  # The converted .gap from Part 2, on the sampling machine; its gap_files/
+  # directory must stay beside it.
+  energy_potential: /scratch/project_2003566/zarrout1/lico_tutorial/lico_potential/gap_files/LiCO/LiCO.gap
+  carry_dipole_model: true
+
+  # Whole neutral units, so every cluster stays neutral.
+  mc_species: [Li2CO3]
+  mc_molecule_files: [data/li2co3_unit.xyz]
+  mc_mu_reference: e0
+  # PLACEHOLDER: calibrate against the insertion energy before trusting a run
+  # (workflows/lif/validation/gcmc_scan.py shows how).
+  mc_mu: [-9.0]
+  mc_types: [move, insertion, removal]
+  mc_acceptance: [2, 1, 1]
+  n_candidates: 100
+  discard_initial: 2
+  mc:
+    mc_nsteps: 400
+    mc_move_max: 0.3
+    # Below the shortest Li-O bond, so an insertion can bond but not overlap.
+    mc_min_dist: 1.5
+    # Without it, insertions land in the vacuum of a 20 A box and are rejected.
+    mc_max_dist: 4.0
+    t_beg: 500.0
+    write_xyz: 5
+
+selection:
+  method: fps
+  n_select: 15
+  # Drop collapsed geometries before diversity picks them: FPS prefers
+  # whatever is least like the training set, which is exactly those.
+  min_separation: 0.9
+  max_atoms: 60
+
+vasp:
+  worker: roihu_cpu_vasp
+  exec_config: roihu_vasp_config
+  molecular: true
+  min_vacuum: 8.0
+  user_incar_settings:
+    LCALCPOL: true
+    LEPSILON: true
+    ENCUT: 520.0
+  # The dispatcher is a few seconds of Python; one structure, one Slurm job,
+  # sized by the tiers below (first tier the structure fits).
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 1, time: "00:15:00"}
+  resource_tiers:
+    - max_atoms: 24
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 32, time: "02:00:00"}
+    - max_atoms: null
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 128, time: "06:00:00"}
+  require_all: false
+
+fit:
+  worker: triton_gapfit
+  resources: {account: sumo, partition: sumo, nodes: 1,
+              ntasks: 48, cpus_per_task: 1, time: "12:00:00"}
+  hyperparameters_file: gap_hypers.yaml
+  mpi_ranks: 48
+  num_processes: 1
+  default_dipole_sigma: 0.02
+  # A pure dipole model has no isolated-atom energy.
+  e0: {Li: 0.0, C: 0.0, O: 0.0}
+  gap_file_name: lico_dipole.xml
+
+energy_fit:
+  # Mode B: the frozen potential drives sampling. The VASP energies and forces
+  # still go into the dataset, so turning this on later needs no new DFT.
+  enabled: false
+
+validation:
+  # A fixed number of iterations. `enabled: true` with `source: generate` adds
+  # an independent test walk and stops at a tolerance; see
+  # workflows/lif/aims/training.yaml.
+  enabled: false

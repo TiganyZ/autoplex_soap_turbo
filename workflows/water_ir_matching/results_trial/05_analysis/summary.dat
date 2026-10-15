@@ -1,7 +1,0 @@
-# 1:index 2:arm 3:biased 4:family 5:thermostat 6:bias_target_kt 7:scale 8:dissimilarity 9:rel_mismatch 10:live_mean 11:live_sd 12:live_from_step 13:T_mean 14:T_offset 15:residual_corr
-  0  ref_naive               0 naive      bussi    0.0000   0.000000e+00     236.3709   0.664046     238.7829     9.8166     7625   308.037     8.037       nan
-  1  biased_naive            1 naive      bussi    0.5000   0.000000e+00     250.2043   0.683202     235.7400    11.5193     7625   309.740     9.740    0.9507
-  2  ref_xl                  0 xl         bussi    0.0000   0.000000e+00     236.3709   0.664046     331.1800    50.9894     3599   308.037     8.037       nan
-  3  biased_xl               1 xl         bussi    0.5000   0.000000e+00     266.7941   0.705488     345.4420    39.7365     3599   305.358     5.358    0.7576
-  4  ref_gle                 0 gle        gle      0.0000   0.000000e+00     236.0549   0.663602     253.2721    11.0874     7625   379.064    79.064       nan
-  5  biased_gle              1 gle        gle      0.5000   0.000000e+00     250.4976   0.683602     260.2163     9.8537     7625   380.726    80.726    0.9497

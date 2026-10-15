@@ -1,7 +1,0 @@
-# GLE drift matrix A_p, fs^-1, row-major, order 3 (n_s = 2).
-# Built by make_gle_kernel.py for an IR fit from 400 cm^-1.
-# a_pp = 2.000e-04 fs^-1; modes (c, lambda) = (0.02, 0.002), (0.006, 0.0002)
-# Ktilde(0) = 0.3802 fs^-1 (slow modes held hard)
-   2.0000000000e-04   2.0000000000e-02   6.0000000000e-03
-  -2.0000000000e-02   2.0000000000e-03   0.0000000000e+00
-  -6.0000000000e-03   0.0000000000e+00   2.0000000000e-04

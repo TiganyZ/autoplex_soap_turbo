@@ -26,3 +26,22 @@ workflows/**/data/*.xyz
 !workflows/**/data/*_unit.xyz
 !workflows/**/data/README.md
 *.log
+
+# Calculation output. Regenerate results from examples/ir_spectra/ instead.
+/results/
+workflows/**/results_trial/
+workflows/**/runs/
+workflows/**/runs_pred/
+workflows/water_ir_tensoap/bin/
+*.png
+*.eps
+
+# Scratch from local runs.
+/job_*/
+/site
+*_iteration_[0-9]*/
+.pytest_cache/
+.ruff_cache/
+
+# Extra machine configurations, e.g. the tutorial's. Hold the MongoDB password.
+config/machines.*.conf

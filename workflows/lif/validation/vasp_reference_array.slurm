@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=lif_vasp_ref
-#SBATCH --account=project_2017844
+#SBATCH --account=project_2006384
 #SBATCH --partition=small
 #SBATCH --nodes=1
 #SBATCH --ntasks=16
@@ -33,7 +33,7 @@ source /etc/profile.d/zz-csc-env.sh >/dev/null 2>&1
 module use /projappl/project_2020289/modules/modulefiles
 module load vasp/cpu/6.6.1
 
-d=$(printf "/scratch/project_2017844/gap_calculations/lif_dipole_test/vasp/combined/frame_%04d" "$SLURM_ARRAY_TASK_ID")
+d=$(printf "/scratch/project_2006384/zarrout1/gap_calculations/lif_dipole_test/vasp/combined/frame_%04d" "$SLURM_ARRAY_TASK_ID")
 [ -d "$d" ] || { echo "no such frame: $d"; exit 1; }
 cd "$d" || exit 1
 

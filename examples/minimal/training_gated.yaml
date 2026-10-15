@@ -1,0 +1,60 @@
+# The same example, stopped by a measurement rather than by a count.
+#
+#     python examples/minimal/run.py --config training_gated.yaml --stub
+#
+# The only difference from training.yaml is the `validation:` section below, and
+# it changes the shape of the whole run. With it off, every job exists before
+# submission and `jf job list` shows the entire run. With it on, each iteration
+# ends in a check that either stops the run or *builds the next one* -- so the
+# remaining jobs appear as the run decides it needs them.
+#
+# That is jobflow's `Response(replace=...)`, and `convergence_gate` in
+# flows/iterative_dipole.py is the worked example to read. `--stub` exercises it
+# for real: the gate replaces itself several levels deep and the flow's output
+# is a reference through every one of those replacements.
+
+name: minimal_gated
+
+species_list: [H, O]
+iterations: 3          # ignored once validation is on; max_iterations decides
+
+dataset:
+  initial: seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  box: 12.0
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: gap_hypers.yaml
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: rattle
+  n_candidates: 8
+  rattle_stdev: 0.05
+
+selection:
+  n_select: 2
+
+validation:
+  enabled: true
+
+  # Where the held-out set comes from. `file` points at a fixed set of frames
+  # that already carry reference dipoles; `generate` runs a DFT pass to make one
+  # before the loop starts. Here it reuses the seed data, which makes the number
+  # meaningless and the mechanism observable -- the point of this file.
+  source: file
+  file: seed.xyz
+
+  # Stop when the validation RMSE per dipole component reaches this, in e*A.
+  tolerance: 0.15
+
+  # A floor and a ceiling on the loop. The floor stops a lucky first fit from
+  # ending the run; the ceiling stops an unlucky one from never ending it.
+  min_iterations: 1
+  max_iterations: 5

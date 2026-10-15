@@ -1,0 +1,167 @@
+# The quantum-amplitude FHI-aims pass.
+#
+#     python workflows/water_dipole_batch/run.py --config training_quantum.yaml --dry-run
+#     python workflows/water_dipole_batch/run.py --config training_quantum.yaml
+#
+# Same machinery as training.yaml, different structures. These 40 clusters were
+# carved from a GLE quantum-thermostat trajectory rather than packed and
+# relaxed, and they cover the O-H geometries no classically sampled frame
+# reaches: round 3's longest O-H anywhere is 1.0815 A, and 12.89% of the bonds
+# here are beyond that, out to 1.48 A, including six genuine shared protons.
+#
+# Why they are needed: run under a quantum thermostat, the model extrapolates
+# into that region and the OH stretch comes out 172 cm^-1 further to the BLUE
+# instead of to the red, with an eighth of the vibrational energy above 4000
+# cm^-1 where water has no modes. See Part 8 of docs/water-dipole-training.md.
+#
+# Nothing is relaxed. The strained geometry is the entire reason for the frame.
+#
+# The batch is 72-129 atoms, so only the first two resource tiers below are
+# used; the 128-rank tier is inherited and will not fire.
+
+name: water_quantum_r3
+project: autoplex
+
+species_list: [H, O]
+iterations: 1
+
+dataset:
+  # 40 clusters from scripts/carve_quantum_batch.py, validated: charge
+  # balanced 40/40, environment complete 40/40, no close contacts, no
+  # fragments. Provenance in quantum1/QUANTUM_BATCH.md on triton.
+  initial: data/quantum_batch_r3.xyz
+  dipole_key: mu
+  polarizability_key: alpha
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+  periodic: false
+  box: 40.0
+  train_fraction: 0.999   # nothing is held out here; the split happens later
+  seed: 0
+
+# Not used by this flow, but TrainingConfig wants them well-formed.
+fit:
+  hyperparameters_file: gap_hypers.yaml
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: rattle
+
+selection:
+  n_select: 1
+
+validation:
+  enabled: false
+
+aims:
+  worker: roihu_cpu_aims
+  exec_config: roihu_aims_config
+
+  resources:
+    account: project_2003566
+    partition: small
+    nodes: 1
+    ntasks_per_node: 1
+    # 30 min, not the 10 the classical batch used. The dispatcher does no
+    # arithmetic -- it loads a payload, builds 40 child jobs and exits, which
+    # took 14 s when measured on a compute node -- so a longer limit costs
+    # nothing and is only ever touched by a pathology. It was touched: the very
+    # first run against a freshly built venv on Lustre produced no stdout at all
+    # in 10 minutes and was killed at the limit, while every run afterwards,
+    # login node and compute node alike, finished in seconds. A cold
+    # first-touch on ~5 GB of small files is the only difference, and it is not
+    # worth another failed batch to be sure.
+    time: "00:30:00"
+    # One core means 1 GB by default, and the dispatcher holds the frames
+    # payload while importing jobflow, pymatgen and ASE. It was OOM-killed at
+    # 75 seconds. It does no arithmetic, so this is headroom rather than
+    # capacity.
+    # 24G, not 8G. 8G was marginal -- it carried a 40-structure payload once
+    # and was OOM-killed on a 7-structure one.
+    mem: 24G
+
+  # Every tier is a fraction of a node for well under two hours. That is the
+  # main reason this workflow finishes quickly: 60 atoms of water is a far
+  # smaller DFPT problem than 180 atoms of ethanol, and small short requests
+  # backfill instead of queueing.
+  #
+  # The rungs: 1-4 molecules, 5-10, 11-20.
+  # Sized from the one measurement in docs/training-guide.md: a 180-atom
+  # FHI-aims DFPT ran in 5 min 43 s on 128 cores, and 384 cores bought 4% of
+  # runtime while costing ten hours of queue. The rule that follows from it is
+  # 1-3 atoms per rank; every cluster here is 72-180 atoms, so the inherited
+  # tiers -- which put everything above 60 atoms on 128 ranks for four hours --
+  # would give a 72-atom job 0.56 atoms per rank and a walltime forty times its
+  # runtime. Both make it unschedulable rather than fast.
+  resource_tiers:
+    - max_atoms: 80
+      resources:
+        account: project_2003566
+        partition: small
+        nodes: 1
+        ntasks_per_node: 32      # 72 atoms -> 2.3 atoms/rank
+        # 3 h: a 129-atom cluster reached DFPT after 156 SCF iterations and was
+        # cancelled by the walltime margin at 51 min of a 1 h allocation.
+        time: "03:00:00"
+        # 6G, not 2G. 7 of round 1's 40 died in the DFPT Sternheimer solve with
+        # OUT_OF_MEMORY on all three retries at 2G; every one succeeded at 6G.
+        mem_per_cpu: 6G
+    - max_atoms: 130
+      resources:
+        account: project_2003566
+        partition: small
+        nodes: 1
+        ntasks_per_node: 64      # 96-120 atoms -> 1.5-1.9 atoms/rank
+        # 3 h: a 129-atom cluster reached DFPT after 156 SCF iterations and was
+        # cancelled by the walltime margin at 51 min of a 1 h allocation.
+        time: "03:00:00"
+        # 6G, not 2G. 7 of round 1's 40 died in the DFPT Sternheimer solve with
+        # OUT_OF_MEMORY on all three retries at 2G; every one succeeded at 6G.
+        mem_per_cpu: 6G
+    - max_atoms: null
+      resources:
+        account: project_2003566
+        partition: small
+        nodes: 1
+        ntasks_per_node: 128     # 144-180 atoms -> 1.1-1.4; the measured point
+        time: "03:00:00"
+        # 6G, not 2G. 7 of round 1's 40 died in the DFPT Sternheimer solve with
+        # OUT_OF_MEMORY on all three retries at 2G; every one succeeded at 6G.
+        mem_per_cpu: 6G
+
+  # Three attempts, and 300 s held back rather than ethanol's 1800. The margin
+  # only has to cover writing the result and handing it back, and on a 30-minute
+  # allocation half an hour of margin would leave nothing to compute in.
+  #
+  # Note this is the one place where making the jobs short has a real cost:
+  # retries happen *inside* one allocation, so a frame that needs more time than
+  # the tier allows is reported unconverged and dropped rather than resumed in a
+  # fresh job. With `require_all: false` the batch continues without it.
+  max_attempts: 3
+  walltime_margin: 300.0
+
+  molecular: true
+  user_params:
+    species_dir: tight
+    xc: pbe
+    output_level: normal
+    electric_field_response: DFPT
+    output: [dipole, mulliken]
+    compute_forces: true
+
+    # Water clusters are closed-shell with a large gap and converge easily.
+    # 200 is well beyond what one needs and turns a pathological frame into a
+    # fast failure instead of one that eats its whole allocation.
+    sc_iter_limit: 200
+    sc_accuracy_rho: 1.0e-5
+    sc_accuracy_eev: 1.0e-3
+    sc_accuracy_etot: 1.0e-6
+
+    override_illconditioning: .true.
+    KS_method: parallel
+    distributed_spline_storage: true
+
+  require_all: false
+

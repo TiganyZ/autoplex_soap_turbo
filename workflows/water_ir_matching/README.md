@@ -207,9 +207,14 @@ entropy is not, that is the whole argument in one line.
 - **vdW reference units are Å, Å³ and eV·Å⁶**, not the bohr-based units the
   keyword reference documents. turboGAP has built-in values for H, C, O and P
   (`vdw.f90:get_vdw_ref_params`), so for water the config omits them entirely.
-- **`quantum_correction`** differs between estimators: `fft` defaults to the
-  harmonic `ω(1−e^{−ħω/kT})`, while `acf` and `xl` apply `ω²`. A factor of 16
-  at 3400 cm⁻¹, and a tilt rather than a factor, so no fitted scale absorbs it.
+- **`quantum_correction` used to differ between estimators**, and comparing the
+  arms was partly measuring it. `fft` defaults in turboGAP to the harmonic
+  `ω(1−e^{−ħω/kT})`; `acf` and `xl` apply `ω²` through `ir_nu_power`. A factor
+  of 16 at 3400 cm⁻¹, and a tilt rather than a factor, so no fitted scale
+  absorbs it — measured, it moves one dipole model's relative mismatch from
+  0.841 to 0.633, which is more than the difference between the models the arms
+  exist to rank. This package now defaults to `classical` (`ω²`) so all four
+  agree, and `arm_pairs` refuses a mixed-family run under anything else.
 - **The bias is sized against thermal energy**, `(3/2)NkT`, not against the
   cohesive energy. Sizing against `|E_pot|` is how a restraint ends up larger
   than the entire thermal budget and dissociates the system while the

@@ -98,9 +98,9 @@ sampling:
   #     dipole from it. Every written frame then carries this iteration's own
   #     prediction, which is what says where the model is extrapolating.
   #
-  # Carrying the dipole model needs a turboGAP built against the soap_turbo fork
-  # (TiganyZ/soap_turbo, branch 'cleanup'). setup/build_turbogap.sh checks that
-  # out and reports whether the binary understands dipole models.
+  # Carrying the dipole model needs turboGAP master, whose soap_turbo submodule
+  # is the TiganyZ fork. setup/build_turbogap.sh reports whether the binary
+  # understands dipole models.
   method: rattle
   energy_potential: null
   carry_dipole_model: true

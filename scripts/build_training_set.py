@@ -2,7 +2,7 @@
 """Build one train.extxyz out of every finished calculation on disk.
 
     python scripts/build_training_set.py \
-        --root /scratch/project_2017844/gap_calculations/run/aims \
+        --root /scratch/project_2006384/zarrout1/gap_calculations/run/aims \
         --species H O \
         -o train.extxyz
 

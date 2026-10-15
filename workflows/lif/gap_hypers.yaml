@@ -41,6 +41,13 @@ GAP:
     atom_sigma_t: [0.5, 0.4]
     atom_sigma_r_scaling: 0.0
     atom_sigma_t_scaling: 0.0
+    # UNMEASURED FOR THIS CHEMISTRY, and 1.0 is the value that cost the water
+    # dipole model four fifths of its OH-stretch response: at 1.0 the descriptor
+    # weights a bond stretch as one neighbour among forty, and at 2.0 it does
+    # not (docs/water-dipole-training.md Part 7). The same argument applies to a
+    # Li-F stretch, but the water number was measured on water and nothing here
+    # has been measured, so this is left alone and flagged rather than changed.
+    # Run dmudr/ on a LiF configuration before trusting either value.
     amplitude_scaling: 1.0
     central_weight: 1.0
 

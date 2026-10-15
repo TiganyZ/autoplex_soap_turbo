@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -262,7 +263,12 @@ def _run_here(flow, args: argparse.Namespace) -> int:
     kwargs = {"create_folders": True, "ensure_success": bool(args.stub)}
     if store is not None:
         kwargs["store"] = store
-    responses = run_locally(flow, **kwargs)
+    # A stub run's job folders are empty; keep them out of the caller's tree.
+    with contextlib.ExitStack() as stack:
+        if args.stub:
+            scratch = stack.enter_context(tempfile.TemporaryDirectory())
+            stack.enter_context(contextlib.chdir(scratch))
+        responses = run_locally(flow, **kwargs)
 
     # The flow's output is a reference through however many replacements a
     # convergence gate made, so where there is a store to resolve it against,

@@ -1,0 +1,53 @@
+# Mode B with turboGAP MD: a fixed energy potential drives the dynamics, only
+# the dipole model iterates, and a held-out file gates the loop.
+# The full version is workflows/water_dipole_md/.
+
+name: example_frozen_potential_md
+species_list: [H, O]
+
+dataset:
+  initial: ../minimal/seed.xyz
+  dipole_key: mu
+  dipole_unit: e*angstrom
+  periodic: false
+  box: 12.0
+  train_fraction: 0.75
+  seed: 0
+
+fit:
+  hyperparameters_file: ../minimal/gap_hypers.yaml
+
+energy_fit:
+  enabled: false
+
+sampling:
+  method: turbogap_md
+  # Read on the sampling worker, never here, so a placeholder builds and stubs.
+  energy_potential: /path/on/sampling/machine/energy.gap
+  # The potential's own species list, when it covers more than the data.
+  species_list: [H, C, O]
+  carry_dipole_model: true
+  n_candidates: 8
+  discard_initial: 2
+  # Written verbatim into turboGAP's input file.
+  md:
+    md_nsteps: 200
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 300.0
+    t_end: 300.0
+    write_xyz: 20
+
+selection:
+  method: fps
+  n_select: 2
+  min_separation: 0.8
+
+validation:
+  enabled: true
+  source: file
+  file: ../minimal/seed.xyz
+  tolerance: 0.15
+  min_iterations: 1
+  max_iterations: 4

@@ -211,3 +211,16 @@ def test_the_model_outputs_are_stripped_before_a_frame_becomes_a_candidate():
 
     # But the model's own view of the frame is kept, under its own name.
     assert np.allclose(frame.info["predicted_dipole"], [0.31, 0.04, 0.01])
+
+
+def test_observable_energies_turbogap_master_writes_are_stripped():
+    """Master writes energy_dipole whenever a dipole model is loaded."""
+    from autoplex_soap_turbo.turbogap.md import strip_model_outputs
+
+    frame = md_frame()
+    for key in ("energy_dipole", "energy_pdf", "energy_sf", "energy_xrd", "energy_nd"):
+        frame.info[key] = 1.0
+
+    strip_model_outputs(frame, "turbogap_md", non_periodic=True)
+
+    assert not [key for key in frame.info if key.startswith("energy")]

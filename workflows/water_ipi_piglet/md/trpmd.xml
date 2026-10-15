@@ -1,0 +1,92 @@
+<simulation verbosity='medium'>
+  <output prefix='trpmd'>
+    <properties stride='500' filename='out'> [ step, time{picosecond},
+conserved{electronvolt}, temperature{kelvin}, kinetic_cv{electronvolt}, potential{electronvolt} ] </properties>
+    <!-- EVERY BEAD. i-PI writes one file per bead with no `bead` attribute:
+         trpmd.pos_0.xyz ... trpmd.pos_7.xyz. That is 8x the data and 8x the
+         turboGAP dipole evaluations, and it is the point: the exact RPMD
+         estimator averages the dipole over the ring polymer, while the
+         centroid's effective potential is softer than the physical one and
+         red-shifts a stiff mode on its own - the "curvature problem" of
+         centroid MD, which is why the centroid result could only ever be an
+         upper bound.
+         The centroid is written too, cheaply, so the centroid and
+         bead-averaged estimators can be compared on the SAME trajectory. -->
+    <trajectory filename='pos' stride='4' format='xyz'> positions{angstrom} </trajectory>
+    <trajectory filename='xc' stride='4' format='xyz'> x_centroid{angstrom} </trajectory>
+  </output>
+  <total_steps>40000</total_steps>
+  <prng>
+    <seed>91029</seed>
+  </prng>
+  <ffsocket name='turbogap' mode='unix' pbc='true'>
+    <!-- A UNIX socket in /tmp, same as the local runs, so Roihu and the
+         workstation differ in as little as possible. srun steps on one node
+         DO share /tmp - tested on Roihu, one step bound a socket and another
+         step saw it - so there is no reason to prefer TCP here.
+         i-PI also offers mode='inet' with <address>/<port>, and turboGAP's
+         client takes either form (UNIX:name or host:port), if a future run
+         ever needs to cross nodes.
+         The name is rewritten per job by slurm/roihu_trpmd.sh, which then
+         ASSERTS the rewrite took effect: the first version of that sed matched
+         nothing, every client dialled the stale name, and two 15-minute test
+         jobs died before anything else could be learned. -->
+    <address>tgtrpmd</address>
+    <!-- Generous: one turboGAP force call on 192 atoms with vdW takes ~3.4 s
+         on one core, and i-PI's default timeout would call that a dead
+         client. -->
+    <timeout>600</timeout>
+  </ffsocket>
+  <system>
+    <!-- 32 BEADS, not 8. The convergence criterion for a ring polymer is
+         P >~ hbar*omega_max/(kB T), and for an OH stretch at 3400 cm^-1 and
+         298 K that ratio is 16.4 - so the 8-bead PIGLET run was
+         under-converged for the very mode it was meant to measure, on top of
+         its thermostat problem. 32 is affordable here for a reason specific to
+         this machine: a PIMD step costs the SLOWEST client, and clients run
+         concurrently, so 32 clients x 8 ranks = 256 cores on one 384-core node
+         costs about the same wall time per step as 8 clients did. Nothing
+         precomputed depends on the bead count either - `pile_l` needs no
+         fitted matrices, unlike the PIGLET `nm_gle` deck, whose A and C are
+         valid only for the 8 beads they were fitted for.
+         The local 8-bead run gave Kcv = 23.5 eV; this run's Kcv against that
+         number is the convergence check, for free. -->
+    <initialize nbeads='32'>
+      <file mode='xyz'> init.xyz </file>
+      <velocities mode='thermal' units='kelvin'> 298 </velocities>
+    </initialize>
+    <forces>
+      <force forcefield='turbogap'> </force>
+    </forces>
+    <ensemble>
+      <temperature units='kelvin'>298</temperature>
+    </ensemble>
+    <motion mode='dynamics'>
+      <dynamics mode='nvt'>
+        <!-- TRPMD, not PIGLET. The difference is the centroid.
+             `nm_gle` (the PIGLET deck) thermostats the centroid HARDER than
+             the internal modes - max|A| 1.80 against 0.095 in those matrices,
+             and i-PI's own documentation says it "attaches ... a langevin
+             thermostat to the centroid". That is right for converging quantum
+             STATISTICS, which is what PIGLET is for, and fatal for a spectrum:
+             an IR spectrum is a dipole time-correlation function, and a damped
+             centroid does not carry one. The PIGLET arm produced a
+             structureless plateau where the OH stretch should be.
+             `pile_l` separates the two roles. `pile_lambda` sets the internal
+             modes' friction, gamma_k = 2*lambda*omega_k, and 0.5 is critical
+             damping - correct to apply hard, because the internal modes carry
+             no dynamical information at all. `tau` sets the CENTROID's, and it
+             is 100 fs here to match the 1-bead control exactly rather than the
+             free centroid of textbook TRPMD. Matching matters more: the two
+             arms then differ in the number of beads and in nothing else, which
+             is the whole design of this comparison. For a free centroid, make
+             tau enormous. -->
+        <thermostat mode='pile_l'>
+          <tau units='femtosecond'> 100 </tau>
+          <pile_lambda> 0.5 </pile_lambda>
+        </thermostat>
+        <timestep units='femtosecond'> 0.5</timestep>
+      </dynamics>
+    </motion>
+  </system>
+</simulation>

@@ -38,7 +38,25 @@ GAP:
     atom_sigma_t: 0.5
     atom_sigma_r_scaling: 0.0
     atom_sigma_t_scaling: 0.0
-    amplitude_scaling: 1.0
+
+    # 2.0, not 1.0, and this one is measured rather than inherited.
+    #
+    # A neighbour's amplitude is the smooth cutoff polynomial raised to this
+    # power (soap_turbo_radial.f90:1638). At 1.0 it decays gently, so the
+    # descriptor is a broad sum over the whole 5.5 A neighbourhood and a 0.05 A
+    # change in the NEAREST neighbour -- which is what an OH stretch is -- is a
+    # small perturbation on a large flat total. Squaring it concentrates the
+    # weight on the close neighbours, i.e. on a molecule's own covalently bonded
+    # hydrogen at 0.97 A.
+    #
+    # Measured on ten molecules in liquid water, d(mu)/d(r_OH) along the bond:
+    # 0.102 e at amplitude_scaling 1.0, 0.370 e at 2.0, with everything else
+    # held fixed. That is the OH-stretch IR intensity, and it goes as the
+    # square. Held-out total dipole RMSE moves 0.05489 -> 0.05454, i.e. the
+    # change is free; the RMSE could not see the problem either way, because it
+    # is dominated by molecular orientation. See docs/water-dipole-training.md
+    # Part 7.
+    amplitude_scaling: 2.0
     central_weight: 1.0
 
     scaling_mode: polynomial

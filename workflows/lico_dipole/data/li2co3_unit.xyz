@@ -1,0 +1,8 @@
+6
+Properties=species:S:1:pos:R:3 comment="the neutral Li2CO3 unit the grand-canonical walk inserts and removes" pbc="F F F"
+C        0.00000000       0.00000000       0.00000000
+O        0.00000000       1.29000000       0.00000000
+O       -1.11717277      -0.64500000       0.00000000
+O        1.11717277      -0.64500000       0.00000000
+Li      -1.88954234       1.09092778       0.00000000
+Li       1.88954234       1.09092778       0.00000000

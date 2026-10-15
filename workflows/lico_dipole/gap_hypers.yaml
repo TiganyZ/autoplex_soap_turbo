@@ -1,0 +1,38 @@
+# GAP hyperparameters for the lico_dipole workflow.
+#
+# Loaded as autoplex.settings.MLIPHypers, so anything not listed falls back to
+# the defaults in autoplex.settings.GAPSettings. Per-species entries take either
+# one value, broadcast to every species, or one value per species in the order of
+# `species_list` in training.yaml -- here Li then C then O.
+#
+# workflows/water_ladder/gap_hypers.yaml is the one to read: it explains why each
+# value is what it is, rather than only what it is.
+
+GAP:
+  general:
+    # Only descriptors turboGAP can evaluate. QUIP's `soap`, `two_body` and
+    # `three_body` fit fine and cannot be converted, and the workflows refuse
+    # them rather than producing a potential that cannot be used.
+    two_body: false
+    three_body: false
+    soap: false
+    distance_2b: false
+    angle_3b: false
+    soap_turbo: true
+
+    sparse_jitter: 1.0e-8
+
+  soap_turbo:
+    # Must be less than half `dataset.box` in training.yaml, or the descriptor
+    # reaches across the vacuum and back into the molecule.
+    rcut_hard: 5.0
+    rcut_soft: 4.5
+    l_max: 4
+    n_sparse: 500
+    # poly3gauss, not poly3: above alpha_max 7 the poly3 basis is unstable.
+    basis: '"poly3gauss"'
+    delta: 0.5
+
+  # If you turn distance_2b or angle_3b on, cutoff_transition_width must be 0.5.
+  # turboGAP hardcodes that buffer; any other value fits and converts silently,
+  # and then disagrees with QUIP. angle_3b's sparse_method cannot be `uniform`.
