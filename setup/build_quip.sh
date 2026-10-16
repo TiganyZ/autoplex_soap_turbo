@@ -136,9 +136,28 @@ enable_feature HAVE_GAP
 enable_feature HAVE_SOAP_TURBO
 ok "enabled HAVE_GAP and HAVE_SOAP_TURBO in $build_dir/Makefile.inc"
 
+links() {
+    printf 'int main(void){return 0;}\n' | cc -x c - "$@" -o /dev/null >/dev/null 2>&1
+}
+
+# QUIP links -llapack -lblas by default. Some module trees (Triton's openblas)
+# ship only libopenblas, so the libraries compile and the final link fails.
+if ! links -llapack -lblas && links -lopenblas; then
+    if grep -q "^MATH_LINKOPTS" "$build_dir/Makefile.inc"; then
+        sed -i -E "s|^MATH_LINKOPTS.*|MATH_LINKOPTS=-lopenblas|" "$build_dir/Makefile.inc"
+    else
+        printf 'MATH_LINKOPTS=-lopenblas\n' >> "$build_dir/Makefile.inc"
+    fi
+    ok "no liblapack/libblas on the link path; linking -lopenblas instead"
+fi
+
 log "building QUIP (this takes a while)"
+# QUIP's makefiles do not declare every Fortran module dependency, so a parallel
+# build can compile a file before the .mod it uses exists ("Cannot open module
+# file 'system_module.mod'"). make resumes where it stopped, so finish serially.
 if ! make -j "${QUIP_BUILD_JOBS:-4}"; then
-    die "the QUIP libraries failed to build. See the output above; the usual
+    warn "parallel QUIP build failed; retrying serially"
+    make -j 1 || die "the QUIP libraries failed to build. See the output above; the usual
 cause is a compiler or LAPACK/BLAS mismatch with arch/Makefile.$QUIP_ARCH."
 fi
 

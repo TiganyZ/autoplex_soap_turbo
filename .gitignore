@@ -50,3 +50,4 @@ config/machines.*.conf
 workflows/lico/training_user_*.yaml
 tutorial/runs/
 !workflows/lico/data/seed.xyz
+!workflows/lico_dipole/data/seed_structures.xyz
