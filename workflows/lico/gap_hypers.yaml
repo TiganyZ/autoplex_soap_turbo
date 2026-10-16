@@ -1,0 +1,58 @@
+# Descriptors for the periodic Li-C-O energy/force GAP: only the ones turboGAP
+# evaluates natively (soap_turbo, distance_2b, angle_3b).
+# Loaded as autoplex.settings.MLIPHypers; per-species lists follow species_list
+# in training.yaml (Li, C, O).
+
+GAP:
+  general:
+    two_body: false
+    three_body: false
+    soap: false
+    distance_2b: true
+    angle_3b: true
+    soap_turbo: true
+    # 2b and 3b sparse points sit close together; below ~1e-6 their kernel
+    # matrix is numerically singular and gap_fit cannot factorise it.
+    sparse_jitter: 1.0e-6
+
+  distance_2b:
+    cutoff: 5.0
+    # turboGAP hardcodes 0.5; any other value converts silently and disagrees with QUIP.
+    cutoff_transition_width: 0.5
+    # Few points: 25 of them 0.15 A apart at theta 0.5 made the kernel singular.
+    n_sparse: 12
+    covariance_type: ard_se
+    delta: 0.5
+    theta_uniform: 0.5
+    sparse_method: uniform
+
+  angle_3b:
+    cutoff: 3.0
+    cutoff_transition_width: 0.5
+    n_sparse: 100
+    covariance_type: ard_se
+    delta: 0.3
+    # No theta_uniform: autoplex already sets theta_fac, and gap_fit takes one.
+    # Not uniform: that only handles one-dimensional descriptors.
+    sparse_method: cur_points
+
+  soap_turbo:
+    rcut_hard: 5.0
+    rcut_soft: 4.5
+    l_max: 8
+    alpha_max: 8
+    basis: poly3gauss
+    atom_sigma_r: 0.5
+    atom_sigma_t: 0.5
+    atom_sigma_r_scaling: 0.0
+    atom_sigma_t_scaling: 0.0
+    amplitude_scaling: 1.0
+    central_weight: 1.0
+    compress_soap: "true"
+    compress_mode: trivial
+    zeta: 4
+    covariance_type: dot_product
+    delta: 0.1
+    f0: 0.0
+    n_sparse: 500
+    sparse_method: cur_points

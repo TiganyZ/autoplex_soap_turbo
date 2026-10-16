@@ -1,0 +1,74 @@
+# Iterative energy/force GAP for Li2CO3-stoichiometry Li-C-O, against VASP.
+#
+#     python workflows/lico/data/make_seed.py --seed 0
+#     python workflows/lico/run.py --dry-run | --stub | (submit)
+#
+# Every value here is a starting point that makes the loop run, not a converged
+# choice for Li2CO3.
+
+name: lico
+# No project: each user passes their own with --project.
+species_list: [Li, C, O]
+iterations: 4
+
+dataset:
+  # Unlabelled cells: VASP runs on them before the first fit.
+  initial: data/seed.xyz
+  train_fraction: 0.85
+  # Each user picks their own: it drives the split, the sampler and selection.
+  seed: 0
+
+vasp:
+  worker: roihu_cpu_vasp
+  exec_config: roihu_vasp_config
+  # The dispatcher only builds the batch; each static sizes itself by the tiers.
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 1, time: "00:15:00"}
+  resource_tiers:
+    - max_atoms: 30
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 64, time: "02:00:00"}
+    - max_atoms: null
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 128, time: "04:00:00"}
+  # Merged over autoplex_soap_turbo.vasp.statics.DEFAULT_STATIC_INCAR.
+  user_incar_settings:
+    ENCUT: 520
+    KSPACING: 0.25
+    SIGMA: 0.05
+    NCORE: 8
+
+fit:
+  worker: triton_gapfit
+  resources: {account: sumo, partition: sumo, nodes: 1, ntasks: 1,
+              cpus_per_task: 48, time: "08:00:00"}
+  hyperparameters_file: gap_hypers.yaml
+  num_processes: 48
+  # Expected errors: energy and virial per atom (eV), forces (eV/A).
+  default_sigma: [0.002, 0.1, 0.1, 0.0]
+  fit_virials: true
+  gap_file_name: lico.xml
+
+sampling:
+  worker: roihu_cpu_turbogap
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 8, time: "01:00:00"}
+  method: turbogap_md
+  n_candidates: 60
+  discard_initial: 2
+  # Passed verbatim into turboGAP's input file.
+  md:
+    md_nsteps: 4000
+    md_step: 0.5
+    thermostat: bussi
+    tau_t: 100.0
+    t_beg: 800.0
+    t_end: 800.0
+    write_xyz: 50
+
+selection:
+  method: fps
+  n_select: 10
+  # Below the shortest real bond (C-O 1.27 A): only collapsed geometries go.
+  min_separation: 0.9
+  max_atoms: 60

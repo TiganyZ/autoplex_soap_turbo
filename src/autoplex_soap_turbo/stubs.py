@@ -197,6 +197,86 @@ def stubbed_cluster_stages(scores: list[float] | None = None) -> Iterator[None]:
         SCORES[:] = previous_scores
 
 
+@job(data="potential")
+def stub_fit_potential(dataset, config, iteration):
+    n_train = len(dataset["frames"]["train"])
+    return {
+        "iteration": iteration,
+        "n_train": n_train,
+        "n_test": len(dataset["frames"]["test"]),
+        "train_error": {"rmse_energy_per_atom": 2.0, "rmse_forces": 0.08},
+        "test_error": {"rmse_energy_per_atom": 20.0 / (1 + iteration), "rmse_forces": 0.2},
+        "potential": {"files": [], "main": "stub_potential.xml"},
+    }
+
+
+@job(data="frames")
+def stub_sample_periodic(dataset, fit_result, config, iteration):
+    """Rattled copies of the training cells, as a sampler would return them."""
+    from autoplex_soap_turbo.flows.common import as_atoms  # noqa: PLC0415
+    from autoplex_soap_turbo.flows.iterative_energy import (  # noqa: PLC0415
+        strip_reference_labels,
+    )
+    from autoplex_soap_turbo.turbogap.md import strip_model_outputs  # noqa: PLC0415
+
+    rng = np.random.default_rng(500 + iteration)
+    frames = []
+    for frame in as_atoms(dataset["frames"]["train"])[:6]:
+        frame = frame.copy()
+        frame.positions += rng.normal(scale=0.08, size=frame.positions.shape)
+        strip_model_outputs(frame, method="stub", non_periodic=False)
+        strip_reference_labels(frame)
+        frame.info["iteration"] = iteration
+        frames.append(frame)
+    return {"iteration": iteration, "method": "stub", "requested_method": "stub",
+            "n_candidates": len(frames), "frames": frames_to_payload(frames)}
+
+
+@job(data="frames")
+def stub_vasp_statics(structures, iteration: int = 0):
+    """Labels each cell with a made-up energy, zero forces and zero virial."""
+    from autoplex_soap_turbo.flows.common import as_atoms  # noqa: PLC0415
+
+    frames = []
+    for index, frame in enumerate(as_atoms(structures)):
+        frame = frame.copy()
+        frame.info["REF_energy"] = -7.0 * len(frame) + 0.01 * index
+        frame.info["REF_virial"] = np.zeros(9)
+        frame.set_array("REF_forces", np.zeros((len(frame), 3)))
+        frames.append(frame)
+    return {"n_structures": len(frames), "n_harvested": len(frames), "n_failed": 0,
+            "failures": [], "frames": frames_to_payload(frames)}
+
+
+_ENERGY_REPLACEMENTS = {
+    "fit_potential": stub_fit_potential,
+    "sample_periodic": stub_sample_periodic,
+}
+
+
+@contextlib.contextmanager
+def stubbed_energy_stages() -> Iterator[None]:
+    """The same as :func:`stubbed_cluster_stages`, for ``flows.iterative_energy``.
+
+    Selection and merging stay real.
+    """
+    from autoplex_soap_turbo.flows import iterative_energy as module
+
+    previous = {name: getattr(module, name) for name in _ENERGY_REPLACEMENTS}
+    previous_stage = module._reference_stage
+    for name, replacement in _ENERGY_REPLACEMENTS.items():
+        setattr(module, name, replacement)
+    module._reference_stage = lambda structures, settings, iteration: stub_vasp_statics(
+        structures, iteration
+    )
+    try:
+        yield
+    finally:
+        for name, original in previous.items():
+            setattr(module, name, original)
+        module._reference_stage = previous_stage
+
+
 def memory_job_store():
     """An in-memory ``JobStore`` with the additional store the payloads need.
 

@@ -1,0 +1,29 @@
+# Anneal a scrambled Li2CO3 cell with the turboGAP potential, biased towards
+# the crystal's X-ray pattern. Vars: data pot target gam seed nsteps tag
+units           metal
+atom_style      atomic
+boundary        p p p
+read_data       ${data}
+pair_style      turbogap
+pair_coeff      * * ${pot} Li C O
+neighbor        0.5 bin
+# mad/pdf needs ghosts out to rmax + 8 kde + skin.
+comm_modify     cutoff 9.5
+
+compute         gr all mad/pdf r 0.1 8.0 301 kde 0.1
+fix             xrd all mad/xrd c_gr target ${target} q 1.0 8.0 281 &
+                output qFq weighting xray species Li C O gamma 0.0 ${gam} &
+                file ${tag}_xrd.dat write_every 1000
+fix_modify      xrd energy yes
+
+velocity        all create 1500.0 ${seed} mom yes rot yes
+timestep        0.0005
+thermo_style    custom step temp pe f_xrd f_xrd[2]
+thermo_modify   format float %.6g
+thermo          200
+fix             lim all nve/limit 0.05
+run             200
+unfix           lim
+fix             ann all nvt temp 1500.0 300.0 0.05
+run             ${nsteps}
+write_data      ${tag}_final.data nocoeff

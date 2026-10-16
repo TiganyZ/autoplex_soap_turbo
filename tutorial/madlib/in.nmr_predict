@@ -1,0 +1,11 @@
+# Per-atom ShiftML shieldings of one structure, as a dump. Vars: data out
+units           metal
+atom_style      atomic
+boundary        p p p
+read_data       ${data}
+pair_style      zero 3.0
+pair_coeff      * *
+compute         cs all mad/property/python mad_shiftml ncomp 1 pbc yes
+dump            d all custom 1 ${out} id type c_cs
+dump_modify     d format float %.8f sort id
+run 0

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 380" width="860" height="380" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="860" height="380" fill="#ffffff"/>
+  <text x="430" y="30" text-anchor="middle" font-size="19" font-weight="bold" fill="#0f172a">One run, three machines that share no filesystem</text>
+
+  <rect x="30" y="60" width="230" height="120" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="145" y="88" text-anchor="middle" font-size="16" font-weight="bold" fill="#14532d">Runner (alt)</text>
+  <text x="145" y="112" text-anchor="middle" font-size="13.5" fill="#14532d">jf runner: submits jobs,</text>
+  <text x="145" y="131" text-anchor="middle" font-size="13.5" fill="#14532d">moves their results</text>
+  <text x="145" y="160" text-anchor="middle" font-size="13" fill="#14532d">you build + submit here</text>
+
+  <rect x="320" y="60" width="240" height="120" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="440" y="88" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e3a8a">Roihu</text>
+  <text x="440" y="112" text-anchor="middle" font-size="13.5" fill="#1e3a8a">roihu_cpu_vasp → VASP</text>
+  <text x="440" y="131" text-anchor="middle" font-size="13.5" fill="#1e3a8a">roihu_cpu_turbogap → MD</text>
+  <text x="440" y="160" text-anchor="middle" font-size="13" fill="#1e3a8a">Slurm</text>
+
+  <rect x="610" y="60" width="220" height="120" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="720" y="88" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e3a8a">Triton</text>
+  <text x="720" y="112" text-anchor="middle" font-size="13.5" fill="#1e3a8a">triton_gapfit → gap_fit</text>
+  <text x="720" y="160" text-anchor="middle" font-size="13" fill="#1e3a8a">Slurm</text>
+
+  <path d="M260,105 L318,105" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M260,90 C 420,20 560,20 640,58" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="289" y="98" text-anchor="middle" font-size="12" fill="#334155">ssh</text>
+  <text x="450" y="55" text-anchor="middle" font-size="12" fill="#334155">ssh</text>
+
+  <rect x="200" y="260" width="460" height="90" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="430" y="290" text-anchor="middle" font-size="16" font-weight="bold" fill="#78350f">MongoDB: your project's database</text>
+  <text x="430" y="314" text-anchor="middle" font-size="13.5" fill="#78350f">queue · outputs · GridFS (structures, potentials)</text>
+  <text x="430" y="334" text-anchor="middle" font-size="13" fill="#78350f">every stage reads its inputs from here and writes its outputs back</text>
+
+  <path d="M145,180 L300,258" stroke="#d97706" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <path d="M440,180 L440,258" stroke="#d97706" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <path d="M720,180 L560,258" stroke="#d97706" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+</svg>

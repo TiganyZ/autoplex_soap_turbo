@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 470" width="860" height="470" font-family="Helvetica, Arial, sans-serif">
+  <rect width="860" height="470" fill="#ffffff"/>
+  <text x="430" y="30" text-anchor="middle" font-size="19" font-weight="bold" fill="#0f172a">Who does what</text>
+
+  <!-- this repository -->
+  <rect x="40" y="50" width="780" height="70" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="60" y="78" font-size="16" font-weight="bold" fill="#4c1d95">autoplex_soap_turbo</text>
+  <text x="60" y="102" font-size="13.5" fill="#3b0764">iterative loops for turboGAP-compatible GAPs · every stage on its own cluster · data moved through MongoDB, never as paths</text>
+
+  <!-- autoplex -->
+  <rect x="40" y="135" width="380" height="80" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="60" y="162" font-size="16" font-weight="bold" fill="#1e3a8a">autoplex</text>
+  <text x="60" y="184" font-size="13.5" fill="#1e3a8a">fits machine-learned potentials (GAP, …)</text>
+  <text x="60" y="203" font-size="13.5" fill="#1e3a8a">from DFT data; the fork adds soap_turbo</text>
+
+  <!-- atomate2 -->
+  <rect x="440" y="135" width="380" height="80" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="460" y="162" font-size="16" font-weight="bold" fill="#1e3a8a">atomate2</text>
+  <text x="460" y="184" font-size="13.5" fill="#1e3a8a">ready-made DFT jobs ("VASP static")</text>
+  <text x="460" y="203" font-size="13.5" fill="#1e3a8a">each result stored as a task document</text>
+
+  <!-- jobflow -->
+  <rect x="40" y="230" width="380" height="80" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="60" y="257" font-size="16" font-weight="bold" fill="#14532d">jobflow</text>
+  <text x="60" y="279" font-size="13.5" fill="#14532d">a computation as Jobs that depend on</text>
+  <text x="60" y="298" font-size="13.5" fill="#14532d">each other's outputs, grouped in a Flow</text>
+
+  <!-- jobflow-remote -->
+  <rect x="440" y="230" width="380" height="80" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="460" y="257" font-size="16" font-weight="bold" fill="#14532d">jobflow-remote</text>
+  <text x="460" y="279" font-size="13.5" fill="#14532d">a runner that submits each Job to the</text>
+  <text x="460" y="298" font-size="13.5" fill="#14532d">cluster ("worker") it names, over ssh</text>
+
+  <!-- mongo -->
+  <rect x="40" y="325" width="780" height="55" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="60" y="350" font-size="16" font-weight="bold" fill="#78350f">MongoDB</text>
+  <text x="60" y="370" font-size="13.5" fill="#78350f">the queue of jobs, every job's output, and large files (GridFS) — one database per project</text>
+
+  <!-- codes -->
+  <rect x="40" y="395" width="780" height="55" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="60" y="420" font-size="16" font-weight="bold" fill="#1e293b">The programs that do the work</text>
+  <text x="60" y="440" font-size="13.5" fill="#1e293b">VASP / FHI-aims (DFT) · gap_fit from QUIP (fitting) · turboGAP (MD, Monte Carlo) · LAMMPS + MADlib (later)</text>
+</svg>

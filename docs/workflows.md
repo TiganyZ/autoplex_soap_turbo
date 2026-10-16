@@ -26,6 +26,7 @@ There are three kinds:
 | [`water_dipole_md`](#water_dipole_md-water_dipole_md_uncertainty-water_dipole_gcmc) | iterative | FHI-aims | `turbogap_md` | frozen CHO GAP | fps | gated | [`frozen_potential_md`](../examples/frozen_potential_md/) |
 | [`water_dipole_md_uncertainty`](#water_dipole_md-water_dipole_md_uncertainty-water_dipole_gcmc) | iterative | FHI-aims | `turbogap_md` | frozen CHO GAP | committee | gated | [`uncertainty`](../examples/uncertainty/) |
 | [`water_dipole_gcmc`](#water_dipole_md-water_dipole_md_uncertainty-water_dipole_gcmc) | iterative | FHI-aims | `gcmc` | frozen CHO GAP | fps | gated | [`gcmc`](../examples/gcmc/) |
+| [`lico`](#lico) | iterative (energy) | VASP | `turbogap_md` | *is* the output | fps | `iterations` | — |
 | [`vasp_iterative`](#vasp_iterative-and-lifvasp_rssyaml) | custom flow | VASP | autoplex RSS | *is* the output | autoplex | autoplex | — |
 | [`water_dipole_batch`](#water_dipole_batch) | custom flow | FHI-aims | none | none | done beforehand | one pass | — |
 | [`water_ir_matching`](#water_ir_matching) | custom flow | none | turboGAP MD | given | — | one pass | — |
@@ -190,6 +191,20 @@ their validation curves compare samplers directly:
 Examples: `examples/frozen_potential_md/`, `examples/uncertainty/`,
 `examples/gcmc/`.
 
+## `lico`
+
+The periodic energy/force loop, `flows/iterative_energy.py`: fit → turboGAP MD
+(or a Monte-Carlo walk) with the fit → select → VASP statics → merge, with every
+stage on its own worker and the data moving through MongoDB. Li₂CO₃ is the
+worked example; `training_hybrid.yaml` swaps MD for hybrid MC/MD. The tutorial
+notebook pools several runs into one database (`data/master.py`).
+
+```bash
+python workflows/lico/data/make_seed.py --seed 0
+python workflows/lico/run.py --dry-run
+python workflows/lico/run.py --stub
+```
+
 ## `vasp_iterative` and `lif/vasp_rss.yaml`
 
 An energy/force potential from autoplex's random-structure-search loop, against
@@ -206,6 +221,12 @@ python workflows/vasp_iterative/run.py --config workflows/lif/vasp_rss.yaml --dr
 
 No `--stub`: the loop is autoplex's, and its stages are not the ones
 `stubs.py` replaces.
+
+**Its stages must share a filesystem.** autoplex's RSS jobs pass the VASP run
+directories and the training-set directory between them as paths
+(`collect_dft_data` reads `vasprun.xml.gz` from each), so VASP, the selection
+worker and `gap_fit` cannot sit on clusters that share no filesystem. For that
+layout use `lico` above.
 
 ## `water_dipole_batch`
 

@@ -38,6 +38,7 @@ from autoplex_soap_turbo.fitting.descriptors import descriptor_strings
 from autoplex_soap_turbo.fitting.dipole_gap import (
     _bool_flag,
     _format_e0,
+    general_arguments,
     run_gap_fit,
     run_quip,
 )
@@ -173,6 +174,7 @@ def build_energy_gap_parameters(
     else:
         arguments.append(f"e0_method={config.e0_method}")
 
+    arguments += general_arguments(hyperparameters, config.extra)
     arguments += [f"{key}={value}" for key, value in config.extra.items()]
     return arguments
 

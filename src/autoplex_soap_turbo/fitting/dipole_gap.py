@@ -174,8 +174,24 @@ def build_dipole_gap_parameters(
             f"virial_parameter_name={config.virial_parameter_name}",
         ]
 
+    arguments += general_arguments(hyperparameters, config.extra)
     arguments += [f"{key}={value}" for key, value in config.extra.items()]
     return arguments
+
+
+def general_arguments(hyperparameters, extra: dict) -> list[str]:
+    """The ``general`` hyperparameters gap_fit takes as top-level arguments.
+
+    Only ``sparse_jitter`` so far. Left out, QUIP falls back to its own 1e-10,
+    and a dense set of 2b or 3b sparse points then fails to factorise.
+    """
+    general = (hyperparameters.get("general") if isinstance(hyperparameters, dict)
+               else getattr(hyperparameters, "general", None))
+    jitter = (general.get("sparse_jitter") if isinstance(general, dict)
+              else getattr(general, "sparse_jitter", None))
+    if jitter is None or "sparse_jitter" in extra:
+        return []
+    return [f"sparse_jitter={jitter:g}"]
 
 
 def check_gap_fit_supports_dipoles(executable: str = "gap_fit") -> None:
@@ -212,6 +228,46 @@ def check_gap_fit_supports_dipoles(executable: str = "gap_fit") -> None:
     # either way. `setup/check_setup.sh` probes the descriptor parser instead,
     # and a fit against a build without soap_turbo aborts with a clear "failed
     # to parse gap string" that run_gap_fit surfaces.
+
+
+#: QUIP reads each command-line argument into a ``character(2550)``
+#: (libAtoms/System.F90, ``COMMAND_ARG``) and aborts with "Problem reading
+#: command argument N" past it. Three species with angle_3b get there.
+COMMAND_ARG_LIMIT = 2550
+
+#: Longest line written to a gap_fit ``config_file``; libAtoms reads lines of
+#: at most 1024 characters.
+CONFIG_LINE_LIMIT = 1000
+
+
+def _config_file_lines(arguments: list[str]) -> list[str]:
+    """The arguments as config-file lines, each under ``CONFIG_LINE_LIMIT``.
+
+    gap_fit joins the lines of a config file with spaces, so a long ``gap=``
+    value may be broken at any space.
+    """
+    lines = []
+    for argument in arguments:
+        line = ""
+        for word in argument.split(" "):
+            if line and len(line) + 1 + len(word) > CONFIG_LINE_LIMIT:
+                lines.append(line)
+                line = word
+            else:
+                line = f"{line} {word}" if line else word
+        lines.append(line)
+    return lines
+
+
+def _arguments_or_config_file(arguments: list[str], workdir: Path) -> list[str]:
+    """The arguments as given, or ``config_file=`` when one is too long for QUIP."""
+    if max(map(len, arguments), default=0) < COMMAND_ARG_LIMIT:
+        return list(arguments)
+    config = workdir / "gap_fit.cfg"
+    config.write_text("\n".join(_config_file_lines(arguments)) + "\n")
+    logger.info("an argument exceeds QUIP's %d characters; passing %s instead",
+                COMMAND_ARG_LIMIT, config.name)
+    return [f"config_file={config.name}"]
 
 
 def run_gap_fit(
@@ -260,7 +316,7 @@ def run_gap_fit(
     stdout_log = workdir / "gap_fit_out.log"
     stderr_log = workdir / "gap_fit_err.log"
 
-    command = [executable, *arguments]
+    command = [executable, *_arguments_or_config_file(arguments, workdir)]
     if mpi_ranks and mpi_ranks > 1:
         command = [
             "srun", "-n", str(mpi_ranks), "-c", str(num_processes), *command

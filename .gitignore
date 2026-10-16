@@ -45,3 +45,8 @@ workflows/water_ir_tensoap/bin/
 
 # Extra machine configurations, e.g. the tutorial's. Hold the MongoDB password.
 config/machines.*.conf
+
+# Per-user tutorial settings and tutorial run output.
+workflows/lico/training_user_*.yaml
+tutorial/runs/
+!workflows/lico/data/seed.xyz

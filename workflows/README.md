@@ -18,6 +18,7 @@ names the example under [`examples/`](../examples/) that runs the same shape.
 | `lif/` | VASP + FHI-aims | the gated loop, per-structure resource tiers, three sub-workflows |
 | `lif/relaxed/` | FHI-aims | the minimal diff for a sampler change (a relaxing GCMC walk) |
 | `lif/validation/` | VASP | the audit toolkit: box convergence, GCMC calibration |
+| `lico/` | VASP | the periodic energy/force loop across clusters; the tutorial's workflow |
 | `vasp_iterative/` | VASP | autoplex's RSS loop, for an energy/force potential |
 | `ethanol/` | FHI-aims | the cluster ladder, on a frozen CHO potential |
 | `water_ladder/` | FHI-aims | the same, smaller and faster |

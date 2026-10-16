@@ -1,0 +1,40 @@
+# Anneal a shuffled succinic-acid cell with MACE-MP-0b2, biased towards the
+# crystal's 1H and 13C ShiftML spectra (gam 0 is the control). NVT at the
+# experimental cell: MACE-MP has no dispersion worth trusting for a molecular
+# crystal, and expands it under a barostat. Vars: data mace gam nsteps seed tag
+units           metal
+atom_style      atomic
+atom_modify     map yes
+boundary        p p p
+read_data       ${data}
+pair_style      symmetrix/mace
+pair_coeff      * * ${mace} H C O
+
+group           gH type 1
+group           gC type 2
+compute         cs all mad/property/python mad_shiftml ncomp 1 pbc yes
+fix             nh gH mad/nmr c_cs target nmr_H.dat range 5.0 40.0 141 sigma 1.5 &
+                convention shift gamma ${gam} every 2 file ${tag}_H.spec write_every 500
+fix             nc gC mad/nmr c_cs target nmr_C.dat range -40.0 200.0 241 sigma 4.0 &
+                convention shift gamma ${gam} every 2 file ${tag}_C.spec write_every 500
+fix_modify      nh energy yes
+fix_modify      nc energy yes
+
+thermo_style    custom step temp pe f_nh f_nh[2] f_nc f_nc[2]
+thermo_modify   format float %.6g
+thermo          100
+timestep        0.0005
+velocity        all create 1000.0 ${seed} mom yes rot yes
+# Shuffled atoms sit at wrong-species contacts; absorb that first.
+fix             lim all nve/limit 0.03
+run             400
+unfix           lim
+fix             ann all nvt temp 1000.0 300.0 0.05
+run             ${nsteps}
+unfix           ann
+fix             qch all nvt temp 300.0 10.0 0.05
+run             ${nsteps}
+unfix           qch
+min_style       fire
+minimize        0 1e-4 200 2000
+write_data      ${tag}_final.data nocoeff

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 330" width="860" height="330" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect width="860" height="330" fill="#ffffff"/>
+  <text x="430" y="30" text-anchor="middle" font-size="19" font-weight="bold" fill="#0f172a">Matching an experiment inside LAMMPS (MADlib)</text>
+
+  <rect x="30" y="60" width="200" height="80" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="130" y="88" text-anchor="middle" font-size="15" font-weight="bold" fill="#4c1d95">potential</text>
+  <text x="130" y="110" text-anchor="middle" font-size="12.5" fill="#4c1d95">pair_style turbogap (your GAP)</text>
+  <text x="130" y="128" text-anchor="middle" font-size="12.5" fill="#4c1d95">or symmetrix/mace</text>
+
+  <rect x="30" y="170" width="200" height="80" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="130" y="198" text-anchor="middle" font-size="15" font-weight="bold" fill="#14532d">predicted observable</text>
+  <text x="130" y="220" text-anchor="middle" font-size="12.5" fill="#14532d">compute mad/pdf → X-ray</text>
+  <text x="130" y="238" text-anchor="middle" font-size="12.5" fill="#14532d">ShiftML shieldings → NMR</text>
+
+  <rect x="320" y="110" width="230" height="90" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="435" y="140" text-anchor="middle" font-size="15" font-weight="bold" fill="#78350f">E = E_pot + (γ/2) D²</text>
+  <text x="435" y="164" text-anchor="middle" font-size="12.5" fill="#78350f">D = distance from the target</text>
+  <text x="435" y="184" text-anchor="middle" font-size="12.5" fill="#78350f">fix mad/xrd · fix mad/nmr</text>
+
+  <rect x="630" y="60" width="200" height="80" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="730" y="88" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">target</text>
+  <text x="730" y="110" text-anchor="middle" font-size="12.5" fill="#1e293b">a measured spectrum</text>
+  <text x="730" y="128" text-anchor="middle" font-size="12.5" fill="#1e293b">(here: a known crystal's)</text>
+
+  <rect x="630" y="170" width="200" height="80" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="730" y="198" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">MD / annealing</text>
+  <text x="730" y="220" text-anchor="middle" font-size="12.5" fill="#1e3a8a">forces include −∇(γD²/2):</text>
+  <text x="730" y="238" text-anchor="middle" font-size="12.5" fill="#1e3a8a">atoms move to match</text>
+
+  <path d="M230,100 L318,140" stroke="#334155" stroke-width="2" marker-end="url(#d)"/>
+  <path d="M230,210 L318,172" stroke="#334155" stroke-width="2" marker-end="url(#d)"/>
+  <path d="M630,100 L552,140" stroke="#334155" stroke-width="2" marker-end="url(#d)"/>
+  <path d="M550,170 L628,205" stroke="#334155" stroke-width="2" marker-end="url(#d)"/>
+
+  <text x="430" y="295" text-anchor="middle" font-size="13" fill="#334155">Watch f_ID[2], the relative error: it should fall in the biased run and not in the γ = 0 control.</text>
+</svg>

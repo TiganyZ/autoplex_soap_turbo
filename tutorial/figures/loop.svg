@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 420" width="860" height="420" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect width="860" height="420" fill="#ffffff"/>
+  <text x="430" y="30" text-anchor="middle" font-size="19" font-weight="bold" fill="#0f172a">The iterative loop (workflows/lico)</text>
+
+  <!-- seed -->
+  <rect x="30" y="70" width="170" height="70" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="115" y="98" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">seed cells</text>
+  <text x="115" y="120" text-anchor="middle" font-size="12.5" fill="#1e293b">strained, rattled Li₂CO₃</text>
+  <path d="M200,105 L248,105" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- cycle boxes -->
+  <rect x="250" y="70" width="160" height="70" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="330" y="98" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">VASP statics</text>
+  <text x="330" y="120" text-anchor="middle" font-size="12.5" fill="#1e3a8a">E, F, virial · Roihu</text>
+
+  <rect x="480" y="70" width="160" height="70" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="560" y="98" text-anchor="middle" font-size="15" font-weight="bold" fill="#4c1d95">fit GAP</text>
+  <text x="560" y="120" text-anchor="middle" font-size="12.5" fill="#4c1d95">gap_fit · Triton</text>
+
+  <rect x="660" y="200" width="170" height="70" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="745" y="228" text-anchor="middle" font-size="15" font-weight="bold" fill="#14532d">sample</text>
+  <text x="745" y="250" text-anchor="middle" font-size="12.5" fill="#14532d">turboGAP MD with it</text>
+
+  <rect x="480" y="320" width="160" height="70" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="560" y="348" text-anchor="middle" font-size="15" font-weight="bold" fill="#78350f">select</text>
+  <text x="560" y="370" text-anchor="middle" font-size="12.5" fill="#78350f">most unlike training set</text>
+
+  <rect x="250" y="320" width="160" height="70" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="330" y="348" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">VASP statics</text>
+  <text x="330" y="370" text-anchor="middle" font-size="12.5" fill="#1e3a8a">only those few</text>
+
+  <rect x="40" y="200" width="170" height="70" rx="10" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+  <text x="125" y="228" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e293b">merge</text>
+  <text x="125" y="250" text-anchor="middle" font-size="12.5" fill="#1e293b">into the training set</text>
+
+  <path d="M410,105 L478,105" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <path d="M640,115 C 700,130 740,160 745,198" stroke="#334155" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <path d="M745,270 C 740,310 700,340 642,350" stroke="#334155" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <path d="M480,355 L412,355" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+  <path d="M250,350 C 180,340 135,310 127,272" stroke="#334155" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <path d="M150,200 C 220,160 400,170 478,128" stroke="#7c3aed" stroke-width="2.5" stroke-dasharray="6 4" fill="none" marker-end="url(#a)"/>
+  <text x="220" y="207" font-size="13" font-style="italic" fill="#4c1d95">refit, next iteration</text>
+
+  <text x="430" y="240" text-anchor="middle" font-size="13" fill="#334155">The model drives its own sampling, so DFT</text>
+  <text x="430" y="258" text-anchor="middle" font-size="13" fill="#334155">is spent where the model is still wrong,</text>
+  <text x="430" y="276" text-anchor="middle" font-size="13" fill="#334155">not on configurations it already knows.</text>
+</svg>

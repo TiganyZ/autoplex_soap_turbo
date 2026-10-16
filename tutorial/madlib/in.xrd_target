@@ -1,0 +1,16 @@
+# The X-ray pattern of a structure, written as a target for fix mad/xrd.
+# A gamma-0 run 0 writes "x y_pred y_exp"; the reader takes the first two
+# columns, so its output is itself a valid target. flat_target.dat is a
+# placeholder on the same q range, needed only because target is required.
+# Vars: data out
+units           metal
+atom_style      atomic
+boundary        p p p
+read_data       ${data}
+pair_style      zero 9.5
+pair_coeff      * *
+neighbor        0.5 bin
+compute         gr all mad/pdf r 0.1 8.0 301 kde 0.1
+fix             xrd all mad/xrd c_gr target flat_target.dat q 1.0 8.0 281 &
+                output qFq weighting xray species Li C O gamma 0.0 file ${out}
+run 0

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 360" width="860" height="360" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect width="860" height="360" fill="#ffffff"/>
+  <text x="430" y="30" text-anchor="middle" font-size="19" font-weight="bold" fill="#0f172a">Many runs, one pooled database</text>
+
+  <rect x="30" y="60" width="230" height="64" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="145" y="86" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">lico_alice · seed 1</text>
+  <text x="145" y="108" text-anchor="middle" font-size="12.5" fill="#1e3a8a">her own project + database</text>
+  <rect x="30" y="140" width="230" height="64" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="145" y="166" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">lico_bob · seed 2</text>
+  <text x="145" y="188" text-anchor="middle" font-size="12.5" fill="#1e3a8a">his own project + database</text>
+  <rect x="30" y="220" width="230" height="64" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="145" y="246" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e3a8a">lico_you · seed 3</text>
+  <text x="145" y="268" text-anchor="middle" font-size="12.5" fill="#1e3a8a">yours</text>
+
+  <rect x="340" y="120" width="230" height="110" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="455" y="150" text-anchor="middle" font-size="16" font-weight="bold" fill="#78350f">lico_master</text>
+  <text x="455" y="174" text-anchor="middle" font-size="12.5" fill="#78350f">one document per configuration</text>
+  <text x="455" y="194" text-anchor="middle" font-size="12.5" fill="#78350f">who · which seed · which DFT settings</text>
+  <text x="455" y="214" text-anchor="middle" font-size="12.5" fill="#78350f">duplicates stored once</text>
+
+  <path d="M260,92 L338,150" stroke="#334155" stroke-width="2" marker-end="url(#m)"/>
+  <path d="M260,172 L338,174" stroke="#334155" stroke-width="2" marker-end="url(#m)"/>
+  <path d="M260,252 L338,200" stroke="#334155" stroke-width="2" marker-end="url(#m)"/>
+  <text x="298" y="110" text-anchor="middle" font-size="12.5" fill="#334155">push</text>
+
+  <rect x="650" y="120" width="180" height="110" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="740" y="150" text-anchor="middle" font-size="16" font-weight="bold" fill="#4c1d95">pooled model</text>
+  <text x="740" y="174" text-anchor="middle" font-size="12.5" fill="#4c1d95">pull → same flow,</text>
+  <text x="740" y="194" text-anchor="middle" font-size="12.5" fill="#4c1d95">labelled seed, so it</text>
+  <text x="740" y="214" text-anchor="middle" font-size="12.5" fill="#4c1d95">fits straight away</text>
+  <path d="M570,175 L648,175" stroke="#334155" stroke-width="2" marker-end="url(#m)"/>
+  <text x="609" y="166" text-anchor="middle" font-size="12.5" fill="#334155">pull</text>
+
+  <text x="430" y="320" text-anchor="middle" font-size="13" fill="#334155">Different seeds explore different corners. Pooled, the DFT everyone already paid for trains one better model.</text>
+</svg>

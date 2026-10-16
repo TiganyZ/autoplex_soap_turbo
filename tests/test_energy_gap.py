@@ -288,3 +288,31 @@ def test_an_empty_training_set_caps_nothing():
     params, capped = limit_n_sparse(soap_turbo_hypers(), [], ["H", "O"])
 
     assert capped is None
+
+
+def test_an_argument_too_long_for_quip_goes_through_a_config_file(tmp_path):
+    from autoplex_soap_turbo.fitting.dipole_gap import (
+        COMMAND_ARG_LIMIT,
+        CONFIG_LINE_LIMIT,
+        _arguments_or_config_file,
+    )
+
+    short = ["atoms_filename=train.extxyz", "gp_file=gap.xml"]
+    assert _arguments_or_config_file(short, tmp_path) == short
+
+    descriptor = "angle_3b cutoff=3.0 n_sparse=100 Z_center=3 Z1=3 Z2=8"
+    long = [f"gap={{{' :'.join([descriptor] * 60)}}}", *short]
+    assert len(long[0]) > COMMAND_ARG_LIMIT
+    assert _arguments_or_config_file(long, tmp_path) == ["config_file=gap_fit.cfg"]
+    lines = (tmp_path / "gap_fit.cfg").read_text().splitlines()
+    assert max(map(len, lines)) <= CONFIG_LINE_LIMIT
+    assert " ".join(lines) == " ".join(long), "gap_fit joins config lines with spaces"
+
+
+def test_sparse_jitter_from_the_hyperparameters_reaches_gap_fit():
+    from autoplex_soap_turbo.fitting.dipole_gap import general_arguments
+
+    hypers = {"general": {"sparse_jitter": 1e-6}}
+    assert general_arguments(hypers, {}) == ["sparse_jitter=1e-06"]
+    assert general_arguments(hypers, {"sparse_jitter": 1e-4}) == [], "extra wins"
+    assert general_arguments({"general": {}}, {}) == []
