@@ -66,9 +66,11 @@ class EnergyDatasetSettings:
 
 @dataclass
 class EnergyVaspSettings(WorkerSettings):
-    """VASP statics. INCAR merged over ``vasp.statics.DEFAULT_STATIC_INCAR``."""
+    """VASP statics. ``input_set``: ``atomate2`` (INCAR merged over
+    ``vasp.statics.DEFAULT_STATIC_INCAR``) or ``omat24`` (MPRelaxSet as OMat24 ran it)."""
 
     user_incar_settings: dict = field(default_factory=dict)
+    input_set: str = "atomate2"
     resource_tiers: list[dict] = field(default_factory=list)
     require_all: bool = False
 
@@ -455,6 +457,7 @@ def _reference_stage(structures, settings: EnergyTrainingConfig, iteration: int)
         exec_config=settings.vasp.exec_config,
         batch_resources=settings.vasp.resources,
         name_prefix=f"{settings.name} vasp {label}",
+        input_set=settings.vasp.input_set,
     )
     calculation = vasp_static_calculations(structures, settings=static.as_dict(),
                                            require_all=settings.vasp.require_all)

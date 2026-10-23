@@ -1,0 +1,27 @@
+# Example: what madlib examples/grace_lifco stage 08 writes. data filenames are replaced by the job.
+seed: 20261022
+cutoff: n/a
+data:
+  reference_energy: 0
+  save_dataset: true
+potential:
+  finetune_foundation_model: GRACE-FS-OMAT
+  reduce_elements: true
+  shift: auto
+fit:
+  loss:
+    energy: {weight: 16, type: huber, delta: 0.01}
+    forces: {weight: 32, type: huber, delta: 0.01}
+    stress: {weight: 64, type: huber, delta: 0.01}
+  maxiter: 50
+  optimizer: BFGS
+  opt_params: {gtol: 1.e-8}
+  compute_convex_hull: false
+  batch_size: 16
+  test_batch_size: 32
+  jit_compile: true
+  eval_init_stats: true
+  train_max_n_buckets: 2
+  test_max_n_buckets: 1
+  checkpoint_freq: 10
+  progressbar: false

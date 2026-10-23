@@ -1,0 +1,44 @@
+# VASP statics for the frames madlib's GRACE example selected from MAD runs.
+# One pass, no fit: the labels go back to gracemaker. madlib's
+# examples/grace_lifco/stages/vasp_label.sh writes a per-run copy of this file
+# (name, dataset.initial) and drives run.py, status.py and harvest.py.
+#
+
+name: lifco_mad
+species_list: [Li, C, O, F]
+iterations: 1
+
+dataset:
+  # Two LiF cells, so the template dry-runs; madlib stage 06 writes the real to_label.xyz.
+  initial: data/example_to_label.xyz
+  seed: 0
+
+vasp:
+  worker: roihu_vasp
+  exec_config: roihu_vasp_config
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 1, time: "00:15:00"}
+  # Measured: a 192-atom static takes ~2 min on 128 ranks with these settings.
+  resource_tiers:
+    - max_atoms: 60
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 64, time: "00:30:00"}
+    - max_atoms: null
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 128, time: "00:30:00"}
+  # What GRACE/OMAT foundation models were trained on: OMat24's MPRelaxSet with
+  # PBE.54 POTCARs and ALGO Normal (PBE, 520 eV, MP k-point density -> Gamma
+  # only for these 192-atom cells, LASPH, LREAL Auto). arXiv:2410.12771.
+  input_set: omat24
+  # On top of it, two changes that leave the energy surface alone:
+  #  ISPIN 1: closed shell; the spin-polarized pilot relaxed to |mag| <= 0.0016
+  #   muB per 192 atoms and no selected frame has a broken carbonate, O-O or C-C.
+  #  EDIFF 1e-6: OMat24's 5e-5 eV/atom is 9.6e-3 eV per cell, loose for forces.
+  user_incar_settings:
+    ISPIN: 1
+    EDIFF: 1.0e-6
+    NCORE: 16
+
+# Unused by this flow; present because EnergyTrainingConfig validates them.
+fit:
+  hyperparameters_file: ../lico/gap_hypers.yaml

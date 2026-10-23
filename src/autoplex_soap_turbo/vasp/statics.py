@@ -44,6 +44,11 @@ DEFAULT_STATIC_INCAR: dict = {
     "IBRION": -1,
 }
 
+#: OMat24's statics: pymatgen's MPRelaxSet with PBE.54 POTCARs, ALGO Normal, and
+#: single-point ionic flags (arXiv:2410.12771). What GRACE/OMAT models were trained on.
+OMAT24_INCAR: dict = {"ALGO": "Normal", "NSW": 0, "IBRION": -1}
+OMAT24_POTCAR_FUNCTIONAL = "PBE_54"
+
 #: INCAR keys that change the energy surface. Data computed with different
 #: values of any of these must not be fitted together.
 SETTINGS_KEYS = ("ENCUT", "PREC", "ISMEAR", "SIGMA", "KSPACING", "GGA", "METAGGA",
@@ -60,6 +65,7 @@ class VaspStaticSettings:
     exec_config: str | None = None
     batch_resources: dict = field(default_factory=dict)
     name_prefix: str = "vasp static"
+    input_set: str = "atomate2"
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -83,12 +89,27 @@ class VaspStaticSettings:
         return incar
 
 
+def omat24_input_set(user_incar_settings: dict):
+    """MPRelaxSet as OMat24 ran it, with ``user_incar_settings`` on top."""
+    from pymatgen.io.vasp.sets import MPRelaxSet  # noqa: PLC0415
+
+    incar = {**OMAT24_INCAR, **user_incar_settings}
+    if incar.get("NSW"):
+        raise ValueError(f"NSW is {incar['NSW']}: that relaxes the structure")
+    return MPRelaxSet(user_potcar_functional=OMAT24_POTCAR_FUNCTIONAL, user_incar_settings=incar)
+
+
 def make_vasp_static_maker(settings=None, name: str = "vasp static"):
-    """An atomate2 static maker with these INCAR settings."""
+    """An atomate2 static maker: atomate2's PBEsol base set, or ``input_set: omat24``."""
     from atomate2.vasp.jobs.core import StaticMaker  # noqa: PLC0415
     from atomate2.vasp.sets.core import StaticSetGenerator  # noqa: PLC0415
 
     settings = VaspStaticSettings.from_dict(settings)
+    if settings.input_set == "omat24":
+        return StaticMaker(name=name,
+                           input_set_generator=omat24_input_set(settings.user_incar_settings))
+    if settings.input_set != "atomate2":
+        raise ValueError(f"vasp input_set {settings.input_set!r} is not 'atomate2' or 'omat24'")
     return StaticMaker(
         name=name,
         input_set_generator=StaticSetGenerator(

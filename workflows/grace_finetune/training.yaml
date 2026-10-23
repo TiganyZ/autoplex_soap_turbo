@@ -1,0 +1,18 @@
+# Template. madlib's examples/grace_lifco/stages/finetune_remote.sh writes a
+# per-run copy (name, train, test, input) and drives run.py and result.py.
+name: grace_finetune
+train: data/train.pkl.gz
+test: data/test.pkl.gz
+input: data/input.yaml
+
+# On the worker: tensorpotential's own venv, built from madlib's hashed lock.
+venv: /scratch/work/zarrout1/madlib-grace/venv
+grace_cache: /scratch/work/zarrout1/madlib-grace/grace_models
+# TF_DETERMINISTIC_OPS breaks GRACE under XLA on GPU (scatter_determinism_expander:
+# "Cannot concatenate S64 vs S32"), so GPU fits are not bitwise reproducible.
+deterministic: false
+
+worker: triton_worker
+# Replaces the worker's CPU defaults entirely. One A100: TF 2.20 has sm_80 kernels.
+resources: {partition: gpu-a100-80g, gres: "gpu:a100:1", nodes: 1, ntasks: 1,
+            cpus_per_task: 8, mem: 64G, time: "02:00:00"}
