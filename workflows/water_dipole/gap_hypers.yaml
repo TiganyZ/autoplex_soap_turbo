@@ -54,8 +54,7 @@ GAP:
     # held fixed. That is the OH-stretch IR intensity, and it goes as the
     # square. Held-out total dipole RMSE moves 0.05489 -> 0.05454, i.e. the
     # change is free; the RMSE could not see the problem either way, because it
-    # is dominated by molecular orientation. See docs/water-dipole-training.md
-    # Part 7.
+    # is dominated by molecular orientation.
     amplitude_scaling: 2.0
     central_weight: 1.0
 

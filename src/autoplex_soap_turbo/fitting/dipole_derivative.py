@@ -6,11 +6,9 @@ intensity of a bond stretch is ``|d(mu)/d(r)|^2``, an intramolecular derivative
 that contributes almost nothing to the total-dipole norm -- so a model can win
 every RMSE and have lost the observable it exists to predict.
 
-That is not hypothetical. The round-3 water dipole model scored the campaign's
-best held-out RMSE (0.0549 e.A) and reproduced only a fifth of the previous
-model's OH-stretch IR band on the same trajectory, because ``amplitude_scaling``
-had been inherited as 1.0 from an energy model. See
-``docs/water-dipole-training.md`` Part 7.
+For example, a water dipole model with a good held-out RMSE reproduced only a
+fifth of the OH-stretch IR band, because ``amplitude_scaling`` had been
+inherited as 1.0 from an energy model.
 
 The measurement is cheap: displace one bond per molecule over a small range,
 predict the total dipole at each displacement, and fit a straight line. Ten

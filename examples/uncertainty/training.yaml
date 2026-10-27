@@ -1,6 +1,5 @@
 # Committee selection: several models are fitted on resamples of the data, and
-# the candidates they disagree on most go to DFT. The full version is
-# workflows/water_dipole_md_uncertainty/.
+# the candidates they disagree on most go to DFT.
 
 name: example_uncertainty
 species_list: [H, O]

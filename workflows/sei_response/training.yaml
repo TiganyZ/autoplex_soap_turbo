@@ -1,0 +1,49 @@
+# Template. madlib's examples/mace_polar_sei/stages/02_label_clusters.sh writes a
+# per-run copy (name, dataset.initial, species_list, max_initial_frames) and
+# drives run.py, status.py and harvest.py.
+name: sei_response
+species_list: [Li, Na, C, O, F, H, P]
+iterations: 1
+
+dataset:
+  # Two neutral clusters, so the template dry-runs; madlib stage 02 writes the real clusters.xyz.
+  initial: data/example_clusters.xyz
+  dipole_key: mu
+  polarizability_key: alpha
+  dipole_unit: e*angstrom
+  polarizability_unit: angstrom^3
+  periodic: false
+  seed: 0
+
+vasp:
+  worker: roihu_vasp
+  exec_config: roihu_vasp_config
+  molecular: true
+  # Clusters are boxed with >= 16 A between images; parse.py refuses alpha below this.
+  min_vacuum: 12.0
+  # OMat24's MPRelaxSet (PBE, PBE.54, 520 eV, LASPH), as workflows/lifco_mad labels
+  # the periodic frames; atomate2's default here would be PBEsol. vasp/jobs.py's
+  # DEFAULT_RESPONSE_INCAR goes on top: IDIPOL 4, LEPSILON, EDIFF 1e-7, LREAL False,
+  # ISMEAR 0 -- LREAL is the one difference from the periodic labels.
+  input_set: omat24
+  user_incar_settings:
+    ISPIN: 1
+  resources: {account: project_2003566, partition: small, nodes: 1,
+              ntasks_per_node: 1, time: "00:15:00"}
+  # LEPSILON needs more than 1 GB/core for clusters of ~60 atoms in a 24 A box.
+  resource_tiers:
+    - max_atoms: 40
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 64, mem: 120G, time: "03:00:00"}
+    - max_atoms: null
+      resources: {account: project_2003566, partition: small, nodes: 1,
+                  ntasks_per_node: 128, mem: 240G, time: "06:00:00"}
+  require_all: false
+
+# Unused by this flow; present because TrainingConfig validates them.
+fit:
+  hyperparameters_file: gap_hypers.yaml
+energy_fit:
+  enabled: false
+validation:
+  enabled: false

@@ -1,7 +1,7 @@
 # The same loop with VASP as the reference code instead of FHI-aims: the
 # dipole from LCALCPOL, the polarizability from LEPSILON. Having a `vasp:`
 # section is what selects it. The full versions are workflows/lif/ and
-# workflows/lif/validation/training_frozen_gap.yaml.
+# workflows/lico_dipole/.
 
 name: example_vasp_reference
 species_list: [H, O]

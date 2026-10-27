@@ -1,7 +1,7 @@
 # The cluster ladder: MD on packed clusters that grow by one rung per
 # iteration. The seed carries no dipoles, so the flow first runs the reference
-# code over it -- the seed pass. The full versions are workflows/ethanol/,
-# workflows/water_ladder/ and workflows/water_density/.
+# code over it -- the seed pass. The full versions are workflows/ethanol/
+# and workflows/water_ladder/.
 
 name: example_cluster_ladder
 species_list: [H, O]

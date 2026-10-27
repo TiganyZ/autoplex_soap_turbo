@@ -225,6 +225,7 @@ Inherits `worker`, `exec_config` and `resources` from `WorkerSettings`.
 | `min_vacuum` | `float` | `5.0` | Least separation between periodic images, in Angstrom, at which a polarizability is still derived. |
 | `strict_vacuum` | `bool` | `True` | Refuse a polarizability from a cell that is not dilute, rather than warning about it. |
 | `resource_tiers` | `list[dict]` | `[]` | Per-structure resource requests, matched on atom count. See `AimsSettings` for the shape and the reason. |
+| `input_set` | `str` | `'atomate2'` | `atomate2` (its PBEsol base set) or `omat24` (MPRelaxSet, PBE.54), under the response INCAR. |
 
 ## `WorkerSettings`
 

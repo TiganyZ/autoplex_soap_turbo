@@ -208,6 +208,9 @@ class VaspSettings(WorkerSettings):
     resource_tiers
         Per-structure resource requests, matched on atom count. See
         :class:`AimsSettings` for the shape and the reason.
+    input_set
+        ``atomate2`` (its PBEsol base set) or ``omat24`` (MPRelaxSet, PBE.54),
+        under the response INCAR.
     """
 
     user_incar_settings: dict = field(default_factory=dict)
@@ -216,6 +219,7 @@ class VaspSettings(WorkerSettings):
     min_vacuum: float = 5.0
     strict_vacuum: bool = True
     resource_tiers: list[dict] = field(default_factory=list)
+    input_set: str = "atomate2"
 
 
 @dataclass

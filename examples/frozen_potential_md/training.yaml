@@ -1,6 +1,6 @@
 # Mode B with turboGAP MD: a fixed energy potential drives the dynamics, only
 # the dipole model iterates, and a held-out file gates the loop.
-# The full version is workflows/water_dipole_md/.
+# Full versions: workflows/ethanol/, workflows/water_ladder/.
 
 name: example_frozen_potential_md
 species_list: [H, O]

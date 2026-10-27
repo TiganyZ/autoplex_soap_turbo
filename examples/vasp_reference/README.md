@@ -3,7 +3,7 @@
 A `vasp:` section selects VASP over FHI-aims: the dipole from `LCALCPOL`,
 the polarizability from `LEPSILON`. `resource_tiers` sizes each calculation
 by atom count. Full workflows: `workflows/lif/`,
-`workflows/lif/validation/`.
+`workflows/lico_dipole/`.
 
 ```bash
 ./autoplex_venv/bin/python examples/vasp_reference/run.py --dry-run

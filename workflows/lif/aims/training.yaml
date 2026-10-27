@@ -3,10 +3,9 @@
 #     python workflows/lif/aims/run.py --dry-run
 #     python workflows/lif/aims/run.py
 #
-# The same shape as workflows/lif/validation/training_frozen_gap.yaml -- a
-# frozen energy/force GAP drives a grand-canonical walk, only the dipole model
-# iterates, and an independent test set decides when to stop -- with one thing
-# changed: every reference number comes from FHI-aims rather than VASP.
+# A frozen energy/force GAP drives a grand-canonical walk, only the dipole model
+# iterates, and an independent test set decides when to stop. Every reference
+# number comes from FHI-aims.
 #
 # That is the whole difference, and it is expressed by which section is written.
 # There is no `backend:` key to fall out of step with the settings: an `aims:`
@@ -34,7 +33,7 @@ dataset:
   # it: `seed structures` -> `aims seed` -> `prepare dataset`. That is the whole
   # point of starting from geometries rather than from a dataset.
   #
-  # 18 frames, from workflows/lif/validation/reference_set.xyz: one per cluster
+  # 18 frames: one per cluster
   # size from the calibrated mu = -7.0 grand-canonical walk, plus isolated
   # clusters from the existing LiF training set as controls.
   #
@@ -140,8 +139,7 @@ sampling:
   # Calibrated against this cluster, not guessed, and not transferable. At the
   # bulk formation energy (-8.58 eV/formula unit) the walk accepted one
   # insertion in 124 attempts and reported nothing wrong; mu competes against
-  # the *insertion* energy, about -6.2 eV here. See
-  # workflows/lif/validation/gcmc_report.py.
+  # the *insertion* energy, about -6.2 eV here.
   mc_mu: [-7.0]
 
   mc_types: [move, insertion, removal]

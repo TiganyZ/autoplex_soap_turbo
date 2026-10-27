@@ -51,3 +51,19 @@ workflows/lico/training_user_*.yaml
 tutorial/runs/
 !workflows/lico/data/seed.xyz
 !workflows/lico_dipole/data/seed_structures.xyz
+
+# Campaign records and campaign-specific workflows: kept locally, not in the repo.
+/docs/water-dipole-training.md
+/workflows/lif/HANDOFF.md
+/workflows/lif/validation
+/workflows/water_ir_tensoap
+/workflows/water_ipi_piglet
+/workflows/water_dipole_batch
+/workflows/water_dipole_md
+/workflows/water_dipole_md_uncertainty
+/workflows/water_dipole_gcmc
+/workflows/water_density
+/workflows/water_ir_matching
+/examples/ir_spectra
+/tests/test_ir_spectra_example.py
+!docs/logo.png

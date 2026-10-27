@@ -32,8 +32,7 @@ sampling:
   mc_species: [Li2CO3]
   mc_molecule_files: [data/li2co3_unit.xyz]
   mc_mu_reference: e0
-  # PLACEHOLDER: calibrate against the insertion energy before trusting a run
-  # (workflows/lif/validation/gcmc_scan.py shows how).
+  # PLACEHOLDER: calibrate against the insertion energy before trusting a run.
   mc_mu: [-9.0]
   mc_types: [move, insertion, removal]
   mc_acceptance: [2, 1, 1]

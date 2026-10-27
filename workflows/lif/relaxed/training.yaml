@@ -57,7 +57,7 @@ dataset:
   # it: `seed structures` -> `aims seed` -> `prepare dataset`. That is the whole
   # point of starting from geometries rather than from a dataset.
   #
-  # 18 frames, from workflows/lif/validation/reference_set.xyz: one per cluster
+  # 18 frames: one per cluster
   # size from the calibrated mu = -7.0 grand-canonical walk, plus isolated
   # clusters from the existing LiF training set as controls.
   #
@@ -163,8 +163,7 @@ sampling:
   # Calibrated against this cluster, not guessed, and not transferable. At the
   # bulk formation energy (-8.58 eV/formula unit) the walk accepted one
   # insertion in 124 attempts and reported nothing wrong; mu competes against
-  # the *insertion* energy, about -6.2 eV here. See
-  # workflows/lif/validation/gcmc_report.py.
+  # the *insertion* energy, about -6.2 eV here.
   mc_mu: [-7.5]
 
   mc_types: [move, insertion, removal]

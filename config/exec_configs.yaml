@@ -136,8 +136,8 @@ roihu_vasp_config:
 # BINARY from the sampling one because two workflows sharing one bin/turbogap
 # means a rebuild for one of them silently changes the other.
 #
-# TURBOGAP_BIN is a fallback: workflows/water_ir_matching names `executable`
-# explicitly, and turbogap/ir.py only consults the environment when it does not.
+# TURBOGAP_BIN is a fallback: turbogap/ir.py consults the environment only when
+# a workflow does not name `executable` explicitly.
 # DOSPT_BIN has no such fallback -- the equilibration check reads it or PATH.
 roihu_turbogap_ir_config:
   modules:

@@ -142,6 +142,8 @@ class VaspDipoleSettings:
     exec_config: str | None = None
     batch_resources: dict = field(default_factory=dict)
     name_prefix: str = "vasp dipole"
+    #: ``atomate2`` (its PBEsol base set) or ``omat24`` (MPRelaxSet, PBE.54), under the response INCAR.
+    input_set: str = "atomate2"
 
     def as_dict(self) -> dict:
         """A plain-dict form, because jobflow serialises a job's arguments."""
@@ -232,6 +234,21 @@ def make_vasp_dipole_maker(settings=None, name: str = "vasp dipole"):
     vasp_job_kwargs = {}
     if incar.get("LEPSILON") or incar.get("LCALCPOL"):
         vasp_job_kwargs["auto_gamma"] = False
+
+    if settings.input_set == "omat24":
+        from autoplex_soap_turbo.vasp.statics import omat24_input_set  # noqa: PLC0415
+
+        generator = omat24_input_set(incar)
+    elif settings.input_set == "atomate2":
+        generator = None
+    else:
+        raise ValueError(f"vasp input_set {settings.input_set!r} is not 'atomate2' or 'omat24'")
+    if generator is not None:
+        return StaticMaker(
+            name=name,
+            input_set_generator=generator,
+            run_vasp_kwargs={"vasp_job_kwargs": vasp_job_kwargs} if vasp_job_kwargs else {},
+        )
 
     return StaticMaker(
         name=name,

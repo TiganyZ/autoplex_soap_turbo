@@ -2132,6 +2132,7 @@ def _vasp_stage(selected, settings: TrainingConfig, iteration: int):
         worker=settings.vasp.worker,
         exec_config=settings.vasp.exec_config,
         batch_resources=settings.vasp.resources,
+        input_set=settings.vasp.input_set,
     )
     calculation = vasp_dipole_calculations(
         selected,

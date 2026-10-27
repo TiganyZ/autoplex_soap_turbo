@@ -4,7 +4,7 @@ Each iteration packs a fresh cluster of `cluster_ladder[i]` copies of
 `water.xyz` at `cluster_density` and runs MD on it. `seed_structures.xyz`
 carries no dipoles, so the flow first runs the reference code over it (`aims
 seed` in the job list). Full workflows: `workflows/ethanol/`,
-`workflows/water_ladder/`, `workflows/water_density/`.
+`workflows/water_ladder/`.
 
 ```bash
 ./autoplex_venv/bin/python examples/cluster_ladder/run.py --dry-run

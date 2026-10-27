@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 #: too *large*. The error is systematic rather than noisy -- it is a smooth
 #: function of density -- so an under-converged value looks like a converged one.
 #:
-#: Measured on an LiF monomer (workflows/lif/validation/box_convergence.py):
+#: Measured on an LiF monomer:
 #: +0.4% at 8.4 A between images, +0.1% at 10.4 A, converged by 13 A. Small for a
 #: small molecule, but it scales with alpha/V, so a big cluster in a tight box
 #: drifts further.

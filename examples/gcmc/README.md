@@ -3,7 +3,7 @@
 turboGAP inserts, removes and moves whole molecules at chemical potential
 `mc_mu`, so the training set reaches sizes the seed lacks. `sampling.mc` is
 written verbatim into turboGAP's input. `selection.max_atoms` caps what goes
-to DFT. Full workflows: `workflows/water_dipole_gcmc/`, `workflows/lif/aims/`,
+to DFT. Full workflows: `workflows/lif/`, `workflows/lif/aims/`,
 `workflows/lif/relaxed/`.
 
 ```bash
