@@ -151,7 +151,7 @@ for name in names:
 
 if expected:
     try:
-        from autoplex.settings import GAPSettings
+        from autoplex.fitting.mlip_hypers import GAPSettings
         GAPSettings().soap_turbo
         print("OK autoplex has soap_turbo descriptor settings")
     except Exception:

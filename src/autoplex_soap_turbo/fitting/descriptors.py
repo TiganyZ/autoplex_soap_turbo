@@ -29,7 +29,7 @@ def descriptor_strings(hyperparameters, species_list: list[str]) -> list[str]:
     Parameters
     ----------
     hyperparameters
-        An ``autoplex.settings.GAPSettings``, or anything with the same
+        An ``autoplex.fitting.mlip_hypers.GAPSettings``, or anything with the same
         ``model_dump(by_alias=True)`` shape. Its ``general`` section switches
         descriptors on and off.
     species_list

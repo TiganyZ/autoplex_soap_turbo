@@ -303,7 +303,7 @@ validation:
 GAP_HYPERS_YAML = '''# GAP hyperparameters for the {name} workflow.
 #
 # Loaded as autoplex.settings.MLIPHypers, so anything not listed falls back to
-# the defaults in autoplex.settings.GAPSettings. Per-species entries take either
+# the defaults in autoplex.fitting.mlip_hypers.GAPSettings. Per-species entries take either
 # one value, broadcast to every species, or one value per species in the order of
 # `species_list` in training.yaml -- here {species_order}.
 #

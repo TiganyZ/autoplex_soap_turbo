@@ -134,7 +134,7 @@ def build_dipole_gap_parameters(
     Parameters
     ----------
     hyperparameters
-        An ``autoplex.settings.GAPSettings`` (or anything with the same
+        An ``autoplex.fitting.mlip_hypers.GAPSettings`` (or anything with the same
         ``model_dump(by_alias=True)`` shape). Its ``general`` section selects
         which descriptors are switched on.
     species_list

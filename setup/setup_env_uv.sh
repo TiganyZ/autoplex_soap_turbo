@@ -207,9 +207,9 @@ fi
 # thousands of files. On a home directory with an inode quota that is the
 # difference between an environment that installs and one that dies partway
 # through with an unrelated-looking "failed to create directory" from whichever
-# package happened to be last. `strict` pins the same core versions without them.
+# package happened to be last. `strict-base` pins the same core versions without them.
 if [ -z "$extras" ]; then
-    extras="strict,tests"
+    extras="strict-base,tests"
     case ",$roles," in
         *,aims,*) extras="$extras,aims" ;;   # pyfhiaims, for the FHI-aims parser
     esac
@@ -238,7 +238,9 @@ if [ "$needs_autoplex" = "1" ]; then
 else
     log "roles are '$roles': no fitting here, so autoplex is not installed"
     log "installing atomate2 and the FHI-aims reader directly"
-    uv pip install "atomate2[strict]==0.0.21" pyfhiaims
+    # The version autoplex pins for Python >= 3.11; it brings the split pymatgen, whose
+    # FHI-aims I/O (pymatgen-io-aims) this package depends on.
+    uv pip install "atomate2[strict]==0.1.5" pyfhiaims
 fi
 
 # turboGAP's own quip_xml_to_gap/make_gap_files.py parses the GAP XML with
@@ -312,12 +314,12 @@ print(f"autoplex {getattr(autoplex, '__version__', 'unknown')}")
 
 # The soap_turbo descriptor support is what this fork adds; without it the
 # turboGAP half of the workflow silently degrades to a plain SOAP fit.
-from autoplex.settings import GAPSettings
+from autoplex.fitting.mlip_hypers import GAPSettings
 
 if not hasattr(GAPSettings(), "soap_turbo"):
     raise SystemExit(
         "the installed autoplex has no soap_turbo settings: the submodule is "
-        "not on the soap-turbo-descriptors branch of the fork"
+        "not on the fork's soap_turbo branch (see .gitmodules)"
     )
 print("soap_turbo descriptor support present")
 PYCHECK

@@ -1,4 +1,4 @@
 [submodule "autoplex"]
 	path = autoplex
 	url = https://github.com/TiganyZ/autoplex.git
-  branch = soap-turbo-descriptors
+	branch = soap-turbo-descriptors-2026-10

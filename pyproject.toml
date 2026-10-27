@@ -12,7 +12,7 @@ license = { text = "MIT" }
 
 # autoplex itself is deliberately absent: it is installed editable from the
 # `autoplex/` submodule by setup/setup_env_uv.sh, because this workflow needs
-# the soap-turbo-descriptors fork rather than the PyPI release.
+# the fork's soap_turbo branch (.gitmodules) rather than the PyPI release.
 dependencies = [
     "ase>=3.23",
     "numpy>=1.24",
@@ -22,6 +22,8 @@ dependencies = [
     # does not require -- it only needs jobflow.
     "jobflow>=0.1.17",
     "jobflow-remote>=0.1.5",
+    # pymatgen 2026 moved FHI-aims I/O (pymatgen.io.aims) into its own package.
+    "pymatgen-io-aims>=0.2",
 ]
 
 [project.optional-dependencies]

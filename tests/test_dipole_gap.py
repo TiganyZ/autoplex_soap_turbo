@@ -16,7 +16,7 @@ from autoplex_soap_turbo.fitting.dipole_gap import (
 )
 
 autoplex = pytest.importorskip("autoplex", reason="needs the autoplex submodule")
-from autoplex.settings import GAPSettings  # noqa: E402
+from autoplex.fitting.mlip_hypers import GAPSettings  # noqa: E402
 
 
 def soap_turbo_hypers(**overrides) -> GAPSettings:
